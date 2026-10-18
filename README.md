@@ -62,8 +62,8 @@ by `enrich_products.py` on the refresh host, straight from
 | Path | What it does |
 | --- | --- |
 | `/` | volumes, resolved-label distribution, coverage |
-| `/reviews` | filter by text/title, product, parent, SKU, complaint, source, country, status, dates; product + title, SKU and ASIN link to Amazon |
-| `/review/<id>` | the whole review, AI vs resolved label, confirm / correct / reject, decision history |
+| `/reviews` | filter by text/title, product, parent, SKU, complaint, source, country, status, dates; the return-reason tokens render as chips and rows with no customer comment are marked *code only* and filterable; product + title, SKU and ASIN link to Amazon |
+| `/review/<id>` | the whole review, AI vs resolved label, confirm / correct / reject, decision history — and you can change a decision you already made (the new row supersedes it, the old one stays in the history) |
 | `/monthly` | SKU × month × complaint with share of SKU-month and how many rows a human validated |
 | `/codes` | approve a proposed code into the vocabulary (with a category) or deny and remap its rows |
 | `/quality` | this week's 45-row sample: record a call per row, agreement is computed, not typed |
@@ -73,9 +73,19 @@ by `enrich_products.py` on the refresh host, straight from
 ## Decisions this app makes durable
 
 * **A correction never destroys evidence.** Each decision is an INSERT into
-  `corrections` (AI label, new label, decision, reviewer id, note, timestamp);
-  the resolved label is computed in `v_ai_complaints`, so the AI's original
-  answer stays visible.
+  `corrections` (AI label, new label, decision, reviewer id and name, note,
+  timestamp); the resolved label is computed in `v_ai_complaints`, so the AI's
+  original answer stays visible.
+* **A later decision supersedes an earlier one.** `v_ai_complaints` reads the
+  latest row per review, so changing your mind is another INSERT, never an
+  update. The sheet path behaves the same way: `sync_status='done'` no longer
+  means "skip", it means "compare"; a different value is written as a
+  superseding row and the cell is marked `revised <date>`.
+* **Attribution is real.** Every write records the signed-in username (and its
+  uid where one is configured). The sheet path records the spreadsheet's
+  `lastModifyingUser` from Drive, mapped through `data/reviewers.json`, and says
+  so in its output; an unmapped editor is stored by name with a NULL uid rather
+  than being stamped with someone else's.
 * **Approve is real.** The code is written to `complaint_codes`
   (`source='chadia-approved'`, with a category), its rows stop being
   `is_new_code`, and the classifier may emit it from then on.
@@ -107,6 +117,23 @@ APP_PORT=8080
 ```
 
 `APP_SAMPLE_N` (default 45) changes the weekly sample size.
+
+**More than one reviewer.** Add `APP_USERS` and it replaces `APP_USER`/`APP_PASS`
+entirely — one entry per person, `name:uid:password`, comma-separated:
+
+```
+APP_USERS=chadia:1089:…,philip:1001:…
+```
+
+Each decision then carries the username and uid of whoever was signed in, and the
+header shows who that is. A person with no legacy uid can still be given a login;
+their decisions are recorded by name with a NULL uid, which is true, instead of
+borrowing 1089.
+
+**Freshness.** Every page carries the last successful refresh from the `runs`
+table and turns red past 24 hours. The refresh job (`cx_refresh.sh`, every 30
+minutes) writes one `refresh-<utc>` row per run and exits non-zero with a printed
+summary if any step failed; it no longer reports success while its work fails.
 
 ## Run it locally
 

@@ -13,8 +13,10 @@ box with no build step and no package downloads at runtime.
 Routes
   /                 dashboard: volumes, resolved-label distribution, coverage
   /reviews          filterable list: product / title / sku, complaint, source,
-                    country, parent, month, date range, status; paginated
-  /review/<id>      one review: confirm / correct / reject, in place
+                    country, parent, month, date range, status, checkability; paginated
+  /review/<id>      one review: confirm / correct / reject, in place - and revise a
+                    decision that was already made (the new row supersedes, the old
+                    one stays as history)
   /monthly          SKU x month x complaint rollup (the PowerBI grain)
   /codes            proposed codes: approve (joins the vocabulary) or deny
                     (durable: the code is suppressed and its rows remapped)
@@ -26,8 +28,15 @@ Product identity (product / parent / sku / asin / title) is enriched into
 `classifications` by enrich_products.py on the refresh host, straight from
 amzmanager.all_products. This app never connects to the source database.
 
-Auth: HTTP Basic (APP_USER / APP_PASS). TLS is terminated by the reverse proxy in
-front of the box, so the credentials are never on the wire in clear text.
+Auth: HTTP Basic. APP_USERS="user:uid:password,..." is the real list, so every
+decision is stamped with the person who made it; APP_USER/APP_PASS/APP_REVIEWER_UID
+is the single-user form the first deployment used. TLS is terminated by the
+reverse proxy in front of the box, so the credentials are never on the wire in
+clear text.
+
+This file is deployed on its own (deploy_on_box.sh installs exactly app.py into
+/opt/ai-complaints/app), so it stays a single file: dependency-light, stdlib WSGI
++ pymysql, no imports from the rest of the project.
 """
 import base64
 import csv
@@ -39,17 +48,52 @@ import secrets
 import sys
 import urllib.parse
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from wsgiref.simple_server import make_server
 
 import pymysql
 
-APP_USER = os.environ.get("APP_USER", "chadia")
-APP_PASS = os.environ.get("APP_PASS", "")
-REVIEWER_UID = int(os.environ.get("APP_REVIEWER_UID", "1089"))  # Chadia's uid in the legacy users table
+
+def _load_users():
+    """username -> {pw, uid, name}.
+
+    APP_USERS is authoritative: 'name:uid:password' comma-separated. The single
+    APP_USER/APP_PASS/APP_REVIEWER_UID pair is the fallback that the existing box
+    configuration already carries. A username with no uid still gets recorded by
+    name in corrections.reviewed_by_name — the app never invents a uid.
+    """
+    raw = os.environ.get("APP_USERS", "").strip()
+    users = {}
+    if raw:
+        for item in raw.split(","):
+            if not item.strip():
+                continue
+            name, _, rest = item.strip().partition(":")
+            uid, _, pw = rest.partition(":")
+            if name and pw:
+                users[name] = {"pw": pw, "uid": int(uid) if uid.strip().isdigit() else None,
+                               "name": name}
+    if not users:
+        uid = os.environ.get("APP_REVIEWER_UID", "").strip()
+        users[os.environ.get("APP_USER", "chadia")] = {
+            "pw": os.environ.get("APP_PASS", ""),
+            "uid": int(uid) if uid.isdigit() else None,
+            "name": os.environ.get("APP_USER", "chadia"),
+        }
+    return users
+
+
+USERS = _load_users()
+APP_PASS = next((u["pw"] for u in USERS.values() if u["pw"]), "")
+# Kept for the one-user configuration: the uid every write is stamped with when
+# the signed-in account has none of its own.
+DEFAULT_UID = next((u["uid"] for u in USERS.values() if u["uid"]), None)
 SAMPLE_N = int(os.environ.get("APP_SAMPLE_N", "45"))
 NOT_A_COMPLAINT = "not a complaint"
 PAGE_SIZE = 100
+SLA_HOURS = 24
+APP_URL = os.environ.get("CX_APP_URL", "https://philip.amzmanager.net")
+
 
 # Default deny mappings, same table as sync_corrections.DENY_MAP. A deny with no
 # replacement would silently drop those reviews out of every rollup, so the form
@@ -112,6 +156,21 @@ button.danger{color:var(--bad);border-color:#fecdca}
 .pager{display:flex;gap:10px;align-items:center;margin-top:14px}
 .pager .sp{color:var(--mut);font-size:12.5px}
 td.num,th.num{text-align:right}
+/* return-reason picklist values are chips; the customer's own words are prose.
+   Mixing the two in one grey block is what made 10k rows look like noise. */
+.chip{display:inline-block;padding:1px 8px;border-radius:5px;font-size:11.5px;font-weight:600;
+  background:#eef2ff;border:1px solid #c7d2fe;color:#3730a3;margin:0 4px 3px 0;white-space:nowrap}
+.chip.q{background:#f4f4f5;border-color:#e4e4e7;color:#52525b}
+.txtbody{white-space:pre-wrap;font-size:14.5px;line-height:1.65}
+.txtnone{color:var(--mut);font-size:13px;font-style:italic}
+.txtwrap{display:flex;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid #f1f1f5}
+.stale{display:inline-block;padding:2px 7px;border-radius:5px;background:#fef2f2;border:1px solid #fecaca;color:var(--bad);font-size:11px;font-weight:700}
+.syncbar{margin:0 0 18px;padding:9px 13px;border-radius:8px;font-size:12.5px;border:1px solid;line-height:1.5}
+.syncbar.ok{background:#f0fdf4;border-color:#bbf7d0;color:#166534}
+.syncbar.bad{background:#fef2f2;border-color:#fecaca;color:#b42318}
+.who{color:var(--mut);font-size:12px;margin-left:auto}
+.decision{background:#fafafc;border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:12px;font-size:13px}
+.decision b{font-weight:650}
 """
 
 
@@ -128,17 +187,131 @@ def esc(s):
     return (str(s) if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def page(title, body, active="", msg="", err=False):
+def page(title, body, active="", msg="", err=False, ctx=None):
+    ctx = ctx or {}
+    who = ctx.get("who")
     nav = "".join(
         f'<a href="{u}" class="{"on" if active == u else ""}">{n}</a>'
         for u, n in [("/", "Dashboard"), ("/reviews", "Reviews"), ("/monthly", "Monthly"),
                      ("/codes", "New codes"), ("/quality", "Quality")])
     flash = f'<div class="flash{" err" if err else ""}">{esc(msg)}</div>' if msg else ""
+    who_html = (f'<span class="who">signed in as <b>{esc(who["name"])}</b>'
+                f'{" (uid " + str(who["uid"]) + ")" if who.get("uid") else ""}</span>') if who else ""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · AI Complaint Validation</title><style>{CSS}</style></head>
-<body><header><span class="brand">AI Complaint Validation</span><nav>{nav}</nav></header>
-<main>{flash}{body}</main></body></html>"""
+<body><header><span class="brand">AI Complaint Validation</span><nav>{nav}</nav>{who_html}</header>
+<main>{ctx.get("banner", "")}{flash}{body}</main></body></html>"""
+
+
+# ---------------------------------------------------------------- review text
+# Review text in this corpus is an Amazon return form, not a review: up to six
+# pipe-separated segments where the first one or two are picklist values the
+# customer chose ('Changed Mind', 'My needs changed') and the rest is whatever
+# they typed. 61% of rows contain a pipe and 39% contain no free text at all.
+# Rendering both kinds in one grey block is why the queue read as noise.
+PROSE_MIN = 25          # keep in step with apply_views.HAS_PROSE
+
+
+def text_parts(t):
+    """-> (chips, prose). Mirrors the has_prose rule in apply_views.py exactly."""
+    t = (t or "").strip()
+    if not t:
+        return [], []
+    segs = [s.strip() for s in t.split("|") if s.strip()]
+    if len(segs) == 1:
+        return ([], segs) if len(segs[0]) >= 8 else (segs, [])
+    chips, prose = [], []
+    for s in segs:
+        (prose if len(s) >= PROSE_MIN and " " in s else chips).append(s)
+    seen, uniq = set(), []           # the comment box often repeats the picklist answer
+    for s in prose:
+        if s.lower() in seen:
+            continue
+        seen.add(s.lower())
+        uniq.append(s)
+    return chips, uniq
+
+
+def chips_html(chips, limit=None):
+    if not chips:
+        return ""
+    shown = chips[:limit] if limit else chips
+    more = f'<span class="chip q">+{len(chips) - len(shown)}</span>' if limit and len(chips) > limit else ""
+    return "".join(f'<span class="chip">{esc(c)}</span>' for c in shown) + more
+
+
+def text_html(t):
+    """Full text for the detail view: chips above, the customer's words below."""
+    chips, prose = text_parts(t)
+    out = f'<div class="txtwrap">{chips_html(chips)}</div>' if chips else ""
+    if prose:
+        out += f'<div class="txtbody">{esc(" ".join(prose))}</div>'
+    elif chips:
+        out += '<div class="txtnone">No customer comment — the return reason above is the only text.</div>'
+    else:
+        out += '<div class="txtnone">No review text on this row.</div>'
+    return out
+
+
+def text_snippet(t, n=140):
+    """One-line version for the list: chips, then the prose (or 'code only')."""
+    chips, prose = text_parts(t)
+    head = chips_html(chips, limit=2)
+    if prose:
+        s = " ".join(prose)
+        body = f'<span class="meta">{esc(s[:n])}{"…" if len(s) > n else ""}</span>'
+    else:
+        body = '<span class="meta" style="color:#9d174d">code only — nothing to check</span>'
+    return head + (f'<br>{body}' if head else body)
+
+
+# ---------------------------------------------------------------- refresh health
+# Mirrors refresh_status.py. Duplicated on purpose: this file is deployed alone,
+# and a missing import would silently drop the one signal that says the numbers
+# are stale.
+def refresh_status(cur):
+    cur.execute(f"""SELECT finished_at, n_errors, note FROM runs
+                     WHERE run_id LIKE 'refresh-%%' AND finished_at IS NOT NULL
+                     ORDER BY finished_at DESC LIMIT 1""")
+    last = cur.fetchone()
+    cur.execute(f"""SELECT finished_at FROM runs
+                     WHERE run_id LIKE 'refresh-%%' AND n_errors=0 AND finished_at IS NOT NULL
+                     ORDER BY finished_at DESC LIMIT 1""")
+    ok = cur.fetchone()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    last_ok = ok["finished_at"] if ok else None
+    age = (now - last_ok).total_seconds() / 3600.0 if last_ok else None
+    return {"last_ok": last_ok, "last_run": last["finished_at"] if last else None,
+            "failed": bool(last and (last["n_errors"] or 0) > 0),
+            "note": (last["note"] if last else "") or "", "age_h": age,
+            "ok": bool(age is not None and age <= SLA_HOURS)}
+
+
+def ago(h):
+    if h is None:
+        return "never"
+    if h < 1:
+        return f"{int(h * 60)} min ago"
+    return f"{h:.0f} h ago" if h < 48 else f"{h / 24:.0f} days ago"
+
+
+def banner_html(st):
+    if st["last_ok"] is None:
+        return ('<div class="syncbar bad"><b>No successful refresh recorded.</b> '
+                'Treat every figure on this page as unverified until the refresh runs.</div>')
+    stamp = st["last_ok"].strftime("%d %b %Y %H:%M UTC")
+    if st["ok"]:
+        if st["failed"]:
+            return (f'<div class="syncbar ok">Data refreshed <b>{stamp}</b> ({ago(st["age_h"])}). '
+                    f'<b>Latest attempt failed</b>{": " + esc(st["note"]) if st["note"] else ""} — '
+                    f'the figures are from the last good run.</div>')
+        return f'<div class="syncbar ok">Data refreshed <b>{stamp}</b> ({ago(st["age_h"])}).</div>'
+    return ('<div class="syncbar bad"><b>Data is stale</b> — last successful refresh '
+            f'{stamp}, {ago(st["age_h"])}. This page should refresh every 30 minutes. '
+            'Do not quote these figures until it is fixed.'
+            + (f' Latest error: {esc(st["note"])}' if st["failed"] and st["note"] else "")
+            + '</div>')
 
 
 def parse_qs(environ):
@@ -248,6 +421,14 @@ def build_where(q):
         where.append("v.needs_review=1 AND v.human_validated=0")
     elif st == "newcode":
         where.append("v.is_new_code=1")
+    txt = q.get("tx") or ""
+    if txt == "codeonly":
+        # No free text: only the return-reason picklist, so there is nothing to
+        # read the label against. Filtering these out of the working list is the
+        # difference between a queue of 2,104 and a queue of 1,727.
+        where.append("v.has_prose=0")
+    elif txt == "prose":
+        where.append("v.has_prose=1")
     return ("WHERE " + " AND ".join(where)) if where else "", args
 
 
@@ -277,11 +458,14 @@ def approved_codes(cur):
 
 # ---------------------------------------------------------------- dashboard
 
-def p_dashboard(cur, q, msg=""):
+def p_dashboard(cur, q, msg="", ctx=None):
     cur.execute("SELECT COUNT(*) c FROM classifications"); total = cur.fetchone()["c"]
     cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE human_validated=0 AND needs_review=1"); nr = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE human_validated=0 AND needs_review=1 AND has_prose=0"); nr_co = cur.fetchone()["c"]
     cur.execute("SELECT COUNT(*) c FROM proposed_codes WHERE status='pending'"); pend = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) c FROM corrections"); corr = cur.fetchone()["c"]
+    # DISTINCT review_id, not COUNT(*): a revised decision adds a row, and
+    # counting rows would inflate "human decisions" every time she changes her mind.
+    cur.execute("SELECT COUNT(DISTINCT review_id) c FROM corrections"); corr = cur.fetchone()["c"]
     cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE final_complaint IS NULL"); nofinal = cur.fetchone()["c"]
     cur.execute("SELECT COUNT(DISTINCT final_complaint) c FROM v_ai_complaints"); labels = cur.fetchone()["c"]
     cur.execute("SELECT MIN(review_date) a, MAX(review_date) b FROM classifications"); rng = cur.fetchone()
@@ -300,15 +484,16 @@ def p_dashboard(cur, q, msg=""):
 
     body = f"""<h1>Dashboard</h1>
 <p class="sub">Resolved labels across {total:,} reviews, {rng['a']} to {rng['b']}. Every count uses the resolved
-complaint: the team's correction where one exists, the AI's label otherwise. {nofinal:,} review(s) are excluded
-because they were marked not-a-complaint.</p>
+complaint: the team's correction where one exists, the AI's label otherwise. {nofinal:,} row(s) carry no
+complaint — marked not a complaint, or the AI could not assign one — and are excluded from these figures.</p>
 <div class="grid">
   <div class="kpi"><div class="n">{total:,}</div><div class="l">Reviews classified</div>
     <div class="d">{src['ncx'] or 0:,} ncx · {src['fba'] or 0:,} fba</div></div>
   <div class="kpi"><div class="n">{nr:,}</div><div class="l">Need a human look</div>
-    <div class="d"><a href="/reviews?status=flagged">unreviewed and flagged</a></div></div>
-  <div class="kpi"><div class="n">{corr:,}</div><div class="l">Human decisions</div>
-    <div class="d"><a href="/reviews?status=decided">view decided</a></div></div>
+    <div class="d"><a href="/reviews?status=flagged&tx=prose">unreviewed and flagged</a>
+      · {nr_co:,} are <a href="/reviews?status=flagged&tx=codeonly">code only</a></div></div>
+  <div class="kpi"><div class="n">{corr:,}</div><div class="l">Reviews decided by a human</div>
+    <div class="d"><a href="/reviews?status=decided">view decided</a> · revisions count once</div></div>
   <div class="kpi"><div class="n">{labels}</div><div class="l">Codes in use</div>
     <div class="d">distinct resolved labels</div></div>
   <div class="kpi"><div class="n">{pend}</div><div class="l">New codes to decide</div>
@@ -317,15 +502,18 @@ because they were marked not-a-complaint.</p>
 <h2>Most common complaints</h2>
 <div class="card"><table><thead><tr><th>Complaint</th><th class="num">Reviews</th><th style="width:38%"></th></tr></thead>
 <tbody>{bars}</tbody></table></div>"""
-    return page("Dashboard", body, "/", msg)
+    return page("Dashboard", body, "/", msg, ctx=ctx)
 
 
 # ---------------------------------------------------------------- reviews list
 
-def p_reviews(cur, q, msg=""):
+def p_reviews(cur, q, msg="", ctx=None):
     w, args = build_where(q)
     cur.execute(f"SELECT COUNT(*) c FROM v_ai_complaints v {w}", args)
     n = cur.fetchone()["c"]
+    cur.execute(f"SELECT COUNT(*) c FROM v_ai_complaints v {w} AND v.has_prose=0"
+                if w else f"SELECT COUNT(*) c FROM v_ai_complaints v WHERE v.has_prose=0", args)
+    n_co = cur.fetchone()["c"]
     try:
         pg = max(1, int(q.get("page") or 1))
     except ValueError:
@@ -334,8 +522,8 @@ def p_reviews(cur, q, msg=""):
     cur.execute(f"""SELECT v.review_id, v.review_date, v.product, v.parent, v.sku, v.asin, v.title,
                            v.source, v.country, v.ai_complaint, v.final_complaint,
                            v.human_decision, v.human_validated, v.needs_review, v.is_new_code,
-                           v.human_complaint,
-                           LEFT(COALESCE(v.review_text,''),180) txt
+                           v.human_complaint, v.has_prose,
+                           LEFT(COALESCE(v.review_text,''),400) txt
                       FROM v_ai_complaints v {w}
                      ORDER BY v.review_date DESC, v.review_id DESC
                      LIMIT {PAGE_SIZE} OFFSET {off}""", args)
@@ -365,7 +553,7 @@ def p_reviews(cur, q, msg=""):
           <td>{amz_sku(r["sku"])}</td>
           <td>{amz_asin(r["asin"])}</td>
           <td>{label}<br>{pill}</td>
-          <td class="meta">{esc((r["txt"] or "")[:150])}</td>
+          <td class="meta" style="min-width:300px">{text_snippet(r["txt"])}</td>
           <td><a href="/review/{r['review_id']}">open</a></td></tr>""")
 
     products = options(cur, "SELECT product k, COUNT(*) n FROM v_ai_complaints WHERE product IS NOT NULL GROUP BY product ORDER BY n DESC")
@@ -380,7 +568,8 @@ def p_reviews(cur, q, msg=""):
                                       ("decided", "Decided"), ("newcode", "New code")])
     body = f"""<h1>Reviews</h1>
 <p class="sub">{n:,} match{'' if n == 1 else ''} · page {pg} of {max(1, (n + PAGE_SIZE - 1)//PAGE_SIZE)}
-  · showing {len(rows)} · <a href="/export.csv?{esc(qstr(q))}">export CSV</a>
+  · showing {len(rows)}{'' if q.get("tx") else f' · <b>{n_co:,}</b> of them are code only (no customer comment)'}
+  · <a href="/export.csv?{esc(qstr(q))}">export CSV</a>
   · <a href="/export.csv?{esc(qstr(q, text='1'))}">export with text</a></p>
 <form class="filters" method="get">
   <div><label>Search text or title</label><input name="q" value="{esc(q.get('q',''))}" placeholder="seat cushion"></div>
@@ -391,30 +580,55 @@ def p_reviews(cur, q, msg=""):
   <div><label>Source</label>{select('source', sources, q.get('source'))}</div>
   <div><label>Country</label>{select('country', countries, q.get('country'))}</div>
   <div><label>Status</label><select name="status"><option value="">Any</option>{statuses}</select></div>
+  <div><label>Text</label><select name="tx">
+    <option value="">Any</option>
+    <option value="prose"{" selected" if q.get("tx")=="prose" else ""}>Has a customer comment</option>
+    <option value="codeonly"{" selected" if q.get("tx")=="codeonly" else ""}>Code only (not checkable)</option>
+  </select></div>
   <div><label>From</label><input type="date" name="from" value="{esc(q.get('from',''))}"></div>
   <div><label>To</label><input type="date" name="to" value="{esc(q.get('to',''))}"></div>
   <div><button class="primary">Filter</button></div>
   <div><a href="/reviews">clear</a></div>
 </form>
-<div class="card"><table><thead><tr><th>Date</th><th>Product</th><th>Parent</th><th>SKU</th><th>Asin</th>
+<div class="card"><table><thead><tr><th>Date</th><th>Product</th><th>Parent</th><th>SKU</th><th>ASIN</th>
 <th>Complaint</th><th>Review</th><th></th></tr></thead>
 <tbody>{''.join(trs) or '<tr><td colspan="8" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
 <div class="pager">{f'<a href="/reviews?{esc(qstr(q, page=pg-1))}">← previous</a>' if pg > 1 else ''}
   <span class="sp">page {pg}</span>
   {f'<a href="/reviews?{esc(qstr(q, page=pg+1))}">next →</a>' if off + PAGE_SIZE < n else ''}</div>"""
-    return page("Reviews", body, "/reviews", msg)
+    return page("Reviews", body, "/reviews", msg, ctx=ctx)
 
 
 # ---------------------------------------------------------------- one review
 
-def p_review(cur, rid, q, msg="", err=False):
+def reviewer_label(uid, name):
+    """Who made a call. Never invents a person: 'unattributed' is a fact."""
+    if name:
+        return esc(name) + (f" · uid {uid}" if uid else "")
+    return f"user #{uid}" if uid else "unattributed"
+
+
+def decision_text(decision, new_complaint):
+    if decision == "corrected":
+        return f"corrected to <b>{esc(new_complaint or '—')}</b>"
+    if decision == "accepted":
+        return "<b>confirmed</b> as the AI's label"
+    if decision == "rejected":
+        return "marked <b>not a complaint</b>"
+    return esc(decision or "")
+
+
+def p_review(cur, rid, q, msg="", err=False, ctx=None):
     cur.execute("SELECT * FROM v_ai_complaints v WHERE v.review_id=%s", (rid,))
     r = cur.fetchone()
     if not r:
         return page("Not found", '<div class="card"><div class="empty">No such review.</div></div>',
-                    "/reviews", msg or "No such review.", True)
-    cur.execute("SELECT * FROM corrections WHERE review_id=%s ORDER BY id DESC", (rid,))
+                    "/reviews", msg or "No such review.", True, ctx)
+    cur.execute("""SELECT id, decision, new_complaint, reviewed_by, reviewed_by_name, note, created_at
+                     FROM corrections WHERE review_id=%s ORDER BY id DESC""", (rid,))
     prior = cur.fetchall()
+    state = prior[0] if prior else None
+
     by_cat = defaultdict(list)
     for c in approved_codes(cur):
         by_cat[c["category"] or "Uncategorised"].append(c["code"])
@@ -425,29 +639,49 @@ def p_review(cur, rid, q, msg="", err=False):
         for cat, codes in sorted(by_cat.items()))
 
     prior_html = "".join(
-        f'<div class="meta">· {esc(p["created_at"])} — <b>{esc(p["decision"])}</b>'
-        f'{" to " + esc(p["new_complaint"]) if p["new_complaint"] else ""}'
-        f'{" — " + esc(p["note"]) if p["note"] else ""}</div>' for p in prior) \
+        f'<div class="meta">· {esc(p["created_at"])} — {decision_text(p["decision"], p["new_complaint"])}'
+        f' · {reviewer_label(p["reviewed_by"], p["reviewed_by_name"])}'
+        f'{" — " + esc(p["note"]) if p["note"] else ""}'
+        f'{" <b>· current</b>" if p is state else ""}</div>' for p in prior) \
         or '<div class="meta">No decisions yet.</div>'
+
+    if state:
+        decision_box = (
+            f'<div class="decision"><b>Decided:</b> {decision_text(state["decision"], state["new_complaint"])}'
+            f' · {reviewer_label(state["reviewed_by"], state["reviewed_by_name"])}'
+            f' · {esc(state["created_at"])}'
+            f'{"<br>note: " + esc(state["note"]) if state["note"] else ""}'
+            f'<br><span class="meta">Changing it below <b>supersedes</b> this decision — the row above stays in the '
+            f'history, and every figure switches to your new call.</span></div>')
+    else:
+        decision_box = ('<div class="decision">No decision yet. Whatever you record below is what the dashboard, '
+                        'the monthly rollup and the export will use for this review.</div>')
+
+    warn = ""
+    if not r["has_prose"]:
+        warn = ('<div class="syncbar bad" style="margin:12px 0"><b>Code only.</b> This row has no customer comment — '
+                'the return reason is the whole text, so there is little to check the label against. '
+                'You can still decide it.</div>')
 
     body = f"""<h1>Review {esc(rid)}</h1>
 <p class="sub">{product_cell(r)} · parent {esc(r["parent"] or "—")} · SKU {amz_sku(r["sku"])}
-  · Asin {amz_asin(r["asin"])}<br>{esc(r["review_date"])} · {esc(r["source"] or "")} {esc(r["country"] or "")}
+  · ASIN {amz_asin(r["asin"])}<br>{esc(r["review_date"])} · {esc(r["source"] or "")} {esc(r["country"] or "")}
   {("· order " + esc(r["order_id"])) if r["order_id"] else ""}</p>
+{warn}
 <div class="review">
   <div>
-    <div class="text">{esc(r["review_text"] or "(no text)")}</div>
+    <div class="text" style="padding:0;background:#fff">{text_html(r["review_text"])}</div>
     <div style="margin-top:14px" class="meta">AI assigned <b>{esc(r["ai_complaint"] or "—")}</b>
       {("· category " + esc(r["ai_category"])) if r["ai_category"] else ""}
       {("· second choice " + esc(r["second_complaint"])) if r["second_complaint"] else ""}</div>
     <div style="margin-top:4px" class="meta">Reporting as <b>{esc(r["final_complaint"] or "—")}</b>
       {("· " + esc(r["final_category"])) if r["final_category"] else ""}</div>
-    <div style="margin-top:16px"><b class="meta">History</b>{prior_html}</div>
+    <div style="margin-top:16px">{decision_box}</div>
+    <div style="margin-top:12px"><b class="meta">History</b>{prior_html}</div>
   </div>
   <div class="card" style="padding:14px">
     <form method="post" action="/review/{rid}">
-      <label>Confirm the AI label</label>
-      <button class="primary" name="action" value="accept" style="width:100%;margin-bottom:14px">Confirm “{esc(r["ai_complaint"] or "—")}”</button>
+      {f'<label>Confirm the AI label</label><button class="primary" name="action" value="accept" style="width:100%;margin-bottom:14px">Confirm “{esc(r["ai_complaint"])}”</button>' if r["ai_complaint"] else '<div class="meta" style="margin-bottom:12px">The AI assigned no code to this row — pick one below, or mark it not a complaint.</div>'}
       <label>Correct it</label>
       <select name="pick" style="width:100%;margin-bottom:8px"><option value="">choose a code…</option>{groups}</select>
       <input name="note" placeholder="optional note" style="width:100%;margin-bottom:8px">
@@ -457,12 +691,14 @@ def p_review(cur, rid, q, msg="", err=False):
       <input name="note" placeholder="why (optional)" style="width:100%;margin-bottom:8px">
       <button class="danger" name="action" value="reject" style="width:100%">Not a complaint / remove from reporting</button>
     </form>
+    <div class="meta" style="margin-top:10px">Recorded against your login
+      ({esc((ctx or {}).get("who", {}).get("name", "unknown"))}), not a shared account.</div>
   </div>
 </div>"""
-    return page(f"Review {rid}", body, "/reviews", msg, err)
+    return page(f"Review {rid}", body, "/reviews", msg, err, ctx)
 
 
-def do_review(cur, rid, f):
+def do_review(cur, rid, f, who):
     cur.execute("SELECT complaint FROM classifications WHERE review_id=%s", (rid,))
     row = cur.fetchone()
     if not row:
@@ -472,34 +708,49 @@ def do_review(cur, rid, f):
     ai = row["complaint"]
     act = f.get("action")
     note = (f.get("note") or "")[:500] or None
+    who = who or {}
+
     if act == "accept":
-        cur.execute("""INSERT INTO corrections (review_id, ai_complaint, new_complaint, decision, reviewed_by, note)
-                       VALUES (%s,%s,NULL,'accepted',%s,%s)""", (rid, ai, REVIEWER_UID, note))
-        return "Confirmed.", False
-    if act == "correct":
+        dec, newc = "accepted", None
+    elif act == "correct":
         pick = (f.get("pick") or "").strip()
         if not pick:
             return "Pick a code first.", True
         cur.execute("SELECT code FROM complaint_codes WHERE code=%s AND approved=1", (pick,))
         if not cur.fetchone():
             return f"“{pick}” is not an approved code — approve it on the New codes page first.", True
-        if pick == ai:
-            cur.execute("""INSERT INTO corrections (review_id, ai_complaint, new_complaint, decision, reviewed_by, note)
-                           VALUES (%s,%s,NULL,'accepted',%s,%s)""", (rid, ai, REVIEWER_UID, note))
-            return "That is the AI label — recorded as confirmed.", False
-        cur.execute("""INSERT INTO corrections (review_id, ai_complaint, new_complaint, decision, reviewed_by, note)
-                       VALUES (%s,%s,%s,'corrected',%s,%s)""", (rid, ai, pick, REVIEWER_UID, note))
-        return f"Corrected to {pick}.", False
-    if act == "reject":
-        cur.execute("""INSERT INTO corrections (review_id, ai_complaint, new_complaint, decision, reviewed_by, note)
-                       VALUES (%s,%s,NULL,'rejected',%s,%s)""", (rid, ai, REVIEWER_UID, note))
-        return "Marked as not a complaint; it leaves complaint reporting.", False
-    return "Unknown action.", True
+        dec, newc = ("accepted", None) if pick == ai else ("corrected", pick)
+    elif act == "reject":
+        dec, newc = "rejected", None
+    else:
+        return "Unknown action.", True
+
+    # A decision is a new row, never an update: v_ai_complaints reads the latest id
+    # per review, so inserting is what makes a revision take effect - and the
+    # earlier row stays as evidence of what was decided first.
+    cur.execute("""SELECT decision, new_complaint FROM corrections
+                    WHERE review_id=%s ORDER BY id DESC LIMIT 1""", (rid,))
+    prev = cur.fetchone()
+    if prev and prev["decision"] == dec and norm(prev["new_complaint"]) == norm(newc):
+        return "That is already the recorded decision — nothing changed.", False
+
+    cur.execute("""INSERT INTO corrections (review_id, ai_complaint, new_complaint, decision,
+                                            reviewed_by, reviewed_by_name, note)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (rid, ai, newc, dec, who.get("uid"), who.get("name"), note))
+    what = {"accepted": "Confirmed.", "corrected": f"Corrected to {newc}.", "rejected":
+            "Marked as not a complaint; it leaves complaint reporting."}[dec]
+    if dec == "accepted" and act == "correct":
+        what = "That is the AI label — recorded as confirmed."
+    if prev:
+        what += " Supersedes the earlier decision; reporting now uses this one."
+    return what, False
+
 
 
 # ---------------------------------------------------------------- monthly
 
-def p_monthly(cur, q, msg=""):
+def p_monthly(cur, q, msg="", ctx=None):
     where, args = ["complaint IS NOT NULL"], []
     if q.get("month"):
         where.append("month=%s"); args.append(q["month"])
@@ -531,7 +782,7 @@ def p_monthly(cur, q, msg=""):
     parents = options(cur, "SELECT parent k, SUM(n) n FROM v_ai_complaints_monthly WHERE parent IS NOT NULL GROUP BY parent ORDER BY n DESC")
     complaints = options(cur, "SELECT complaint k, SUM(n) n FROM v_ai_complaints_monthly GROUP BY complaint ORDER BY n DESC")
     body = f"""<h1>Monthly</h1>
-<p class="sub">The grain Chadia reports on: SKU × month × complaint, with the share of that SKU-month and how
+<p class="sub">The grain the team reports on: SKU × month × complaint, with the share of that SKU-month and how
 many rows a human validated. {n:,} rows match{'' if n == 1 else ''} (showing {len(rows)}).
 The review-grain rows behind any filter are on <a href="/reviews">Reviews</a>.</p>
 <form class="filters" method="get">
@@ -546,12 +797,12 @@ The review-grain rows behind any filter are on <a href="/reviews">Reviews</a>.</
 <th>Complaint</th><th>Category</th><th class="num">Reviews</th><th class="num">% of SKU-month</th>
 <th class="num">Human validated</th></tr></thead>
 <tbody>{trs or '<tr><td colspan="9" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>"""
-    return page("Monthly", body, "/monthly", msg)
+    return page("Monthly", body, "/monthly", msg, ctx=ctx)
 
 
 # ---------------------------------------------------------------- codes
 
-def p_codes(cur, q, msg=""):
+def p_codes(cur, q, msg="", ctx=None):
     cur.execute("SELECT * FROM proposed_codes ORDER BY status='pending' DESC, n_rows DESC")
     rows = cur.fetchall()
     approved = approved_codes(cur)
@@ -591,10 +842,10 @@ the code and remaps its reviews to the one you would have chosen; a deny without
 because it would silently drop those reviews out of every rollup.</p>
 <div class="card"><table><thead><tr><th>Code</th><th class="num">Reviews</th><th>Example</th><th>Decision</th></tr></thead>
 <tbody>{''.join(trs) or '<tr><td colspan="4" class="empty">Nothing proposed.</td></tr>'}</tbody></table></div>"""
-    return page("New codes", body, "/codes", msg)
+    return page("New codes", body, "/codes", msg, ctx=ctx)
 
 
-def do_code(cur, f):
+def do_code(cur, f, who):
     code = (f.get("code") or "").strip()
     act = f.get("action") or ""
     if not code or act not in ("approved", "denied"):
@@ -611,7 +862,7 @@ def do_code(cur, f):
         if not cat:
             return "An approved code needs a category — pick one so it appears in the rollups.", True
         cur.execute("""UPDATE proposed_codes SET status='approved', decided_at=NOW(), decided_by=%s, note=%s
-                        WHERE code=%s""", (REVIEWER_UID, cat, code))
+                        WHERE code=%s""", ((who or {}).get("uid"), cat, code))
         cur.execute("""INSERT INTO complaint_codes (code, category, source, approved)
                        VALUES (%s,%s,'chadia-approved',1)
                        ON DUPLICATE KEY UPDATE approved=1, source='chadia-approved',
@@ -632,7 +883,7 @@ def do_code(cur, f):
     if not tgt:
         return f"Replacement “{repl}” is not an approved code.", True
     cur.execute("""UPDATE proposed_codes SET status='denied', decided_at=NOW(), decided_by=%s, note=%s
-                    WHERE code=%s""", (REVIEWER_UID, f"-> {repl}", code))
+                    WHERE code=%s""", ((who or {}).get("uid"), f"-> {repl}", code))
     cur.execute("""INSERT INTO complaint_codes (code, category, source, approved)
                    VALUES (%s,NULL,'chadia-denied',0)
                    ON DUPLICATE KEY UPDATE approved=0, source='chadia-denied'""", (code,))
@@ -642,7 +893,7 @@ def do_code(cur, f):
                    VALUES (%s,%s,%s,%s)
                    ON DUPLICATE KEY UPDATE replacement=VALUES(replacement), note=VALUES(note),
                      decided_by=VALUES(decided_by), decided_at=NOW()""",
-                (code, repl, (f.get("note") or "")[:500] or None, REVIEWER_UID))
+                (code, repl, (f.get("note") or "")[:500] or None, (who or {}).get("uid")))
     cur.execute("""UPDATE classifications SET complaint=%s, category=COALESCE(%s, category), is_new_code=0
                     WHERE complaint=%s""", (repl, tgt["category"], code))
     n = cur.rowcount
@@ -707,8 +958,8 @@ def sample_stats(rows):
 def sample_rows(cur, wk):
     cur.execute("""SELECT s.review_id, s.your_call, s.note, s.decided_at,
                           v.review_date, v.sku, v.product, v.parent, v.asin, v.title,
-                          v.ai_complaint, v.final_complaint, v.final_category,
-                          LEFT(COALESCE(v.review_text,''),220) txt
+                          v.ai_complaint, v.final_complaint, v.final_category, v.has_prose,
+                          LEFT(COALESCE(v.review_text,''),400) txt
                      FROM weekly_samples s
                      JOIN v_ai_complaints v ON v.review_id = s.review_id
                     WHERE s.sample_week=%s
@@ -716,7 +967,7 @@ def sample_rows(cur, wk):
     return cur.fetchall()
 
 
-def record_sample(cur, wk):
+def record_sample(cur, wk, sample_by=None):
     """Roll the filled calls into quality_checks. Under 5 calls is progress, not a
     measurement: recording 100% on n=1 would put a meaningless point on the trend."""
     rows = sample_rows(cur, wk)
@@ -729,17 +980,17 @@ def record_sample(cur, wk):
                    ON DUPLICATE KEY UPDATE sample_n=VALUES(sample_n),
                      agreement_pct=VALUES(agreement_pct), sample_ref=VALUES(sample_ref),
                      note=VALUES(note)""",
-                (week_start(), n, pct, REVIEWER_UID, f"weekly-{wk}",
+                (week_start(), n, pct, sample_by, f"weekly-{wk}",
                  f"weekly random sample: {acc} agreed, {cor} corrected, {rej} removed "
                  f"(excluded from the denominator)"))
     return pct
 
 
-def p_quality(cur, q, msg=""):
+def p_quality(cur, q, msg="", ctx=None):
     wk = ensure_sample(cur)
     rows = sample_rows(cur, wk)
     acc, cor, rej, n = sample_stats(rows)
-    pct = record_sample(cur, wk)
+    pct = record_sample(cur, wk, (ctx or {}).get('who', {}).get('uid'))
     filled = acc + cor + rej
 
     cur.execute("""SELECT week_start, sample_n, agreement_pct, note FROM quality_checks
@@ -764,7 +1015,7 @@ def p_quality(cur, q, msg=""):
           <td class="mono">{esc(r["review_date"])}</td>
           <td>{product_cell(r)}</td>
           <td>{amz_sku(r["sku"])}</td>
-          <td class="meta">{esc((r["txt"] or "")[:170])} <a href="/review/{r['review_id']}">full</a></td>
+          <td class="meta" style="white-space:normal;min-width:280px">{text_snippet(r["txt"], 120)} <a href="/review/{r['review_id']}">full</a></td>
           <td><b>{esc(r["ai_complaint"] or "—")}</b><div class="meta">{esc(r["final_category"] or "")}</div></td>
           <td>{sel}</td></tr>""")
 
@@ -781,10 +1032,11 @@ def p_quality(cur, q, msg=""):
         head, note = f"0/{len(rows)}", f"drawn for {wk} — no calls yet"
 
     body = f"""<h1>Quality</h1>
-<p class="sub">Chadia's two-month weekly check: {SAMPLE_N} reviews drawn at random from the whole classified
+<p class="sub">The weekly random check: {SAMPLE_N} reviews drawn at random from the whole classified
 corpus, stratified by complaint category so a small but important category is not swamped by FBA returns.
 Record the call for each row — the agreement is computed from your calls, there is no percentage to type.
-“Not a complaint” leaves the denominator, exactly as in the sheet workflow.</p>
+“Not a complaint” leaves the denominator, exactly as in the sheet workflow. Rows marked <b>code only</b>
+carry no customer comment; the sample still includes them, so the number stays unbiased.</p>
 <div class="grid">
   <div class="kpi"><div class="n">{head}</div><div class="l">This week ({esc(wk)})</div><div class="d">{note}</div></div>
   <div class="kpi"><div class="n">{len(checks)}</div><div class="l">Weekly checks logged</div><div class="d">taper record</div></div>
@@ -804,10 +1056,10 @@ Record the call for each row — the agreement is computed from your calls, ther
 <h2>Weekly trend</h2>
 <div class="card"><table><thead><tr><th>Week</th><th class="num">Sample</th><th class="num">Agreement</th><th>Note</th></tr></thead>
 <tbody>{trend or '<tr><td colspan="4" class="empty">No weekly check recorded yet.</td></tr>'}</tbody></table></div>"""
-    return page("Quality", body, "/quality", msg)
+    return page("Quality", body, "/quality", msg, ctx=ctx)
 
 
-def do_quality(cur, environ):
+def do_quality(cur, environ, who):
     f = parse_form_multi(environ)
     wk = (f.get("week") or [iso_week()])[0]
     cur.execute("SELECT review_id FROM weekly_samples WHERE sample_week=%s", (wk,))
@@ -820,9 +1072,10 @@ def do_quality(cur, environ):
         if not v:
             continue
         cur.execute("""UPDATE weekly_samples SET your_call=%s, decided_by=%s, decided_at=NOW()
-                        WHERE sample_week=%s AND review_id=%s""", (v[:120], REVIEWER_UID, wk, rid))
+                        WHERE sample_week=%s AND review_id=%s""",
+                    (v[:120], (who or {}).get("uid"), wk, rid))
         n += 1
-    pct = record_sample(cur, wk)
+    pct = record_sample(cur, wk, (who or {}).get("uid"))
     if pct is not None:
         return f"Saved {n} call(s); week {wk} agreement {pct}%.", False
     return f"Saved {n} call(s); agreement is recorded once at least 5 rows are called.", False
@@ -832,7 +1085,8 @@ def do_quality(cur, environ):
 
 EXPORT_COLS = ["review_id", "review_date", "month", "product", "parent", "sku", "asin", "title",
                "source", "country", "ai_complaint", "ai_category", "final_complaint",
-               "final_category", "human_decision", "human_complaint", "needs_review", "is_new_code"]
+               "final_category", "human_decision", "human_complaint", "needs_review", "is_new_code",
+               "has_prose"]
 
 
 def export_csv(cur, q):
@@ -842,7 +1096,7 @@ def export_csv(cur, q):
                            v.product, v.parent, v.sku, v.asin, v.title, v.source, v.country,
                            v.ai_complaint, v.ai_category, v.final_complaint, v.final_category,
                            v.human_decision, v.human_complaint, v.needs_review, v.is_new_code,
-                           v.review_text
+                           v.has_prose, v.review_text
                       FROM v_ai_complaints v {w}
                      ORDER BY v.review_date DESC, v.review_id DESC""", args)
     buf = io.StringIO()
@@ -856,15 +1110,23 @@ def export_csv(cur, q):
 
 # ---------------------------------------------------------------- dispatch
 
-def authorised(environ):
+def auth_user(environ):
+    """The signed-in user as {pw, uid, name}, or None.
+
+    Returning the person (not a boolean) is the whole point: every write stamps
+    reviewed_by from this dict, so the audit trail names whoever actually decided.
+    """
     auth = environ.get("HTTP_AUTHORIZATION", "")
-    if not auth.startswith("Basic ") or not APP_PASS:
-        return False
+    if not auth.startswith("Basic "):
+        return None
     try:
         u, _, p = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
     except Exception:                                          # noqa: BLE001
-        return False
-    return secrets.compare_digest(u, APP_USER) and secrets.compare_digest(p, APP_PASS)
+        return None
+    rec = USERS.get(u)
+    if not rec or not rec["pw"] or not secrets.compare_digest(p, rec["pw"]):
+        return None
+    return rec
 
 
 def app(environ, start_response):
@@ -882,7 +1144,8 @@ def app(environ, start_response):
         start_response(code, [("Content-Type", "text/plain; charset=utf-8")])
         return [body]
 
-    if not authorised(environ):
+    who = auth_user(environ)
+    if not who:
         start_response("401 Unauthorized",
                        [("WWW-Authenticate", 'Basic realm="AI Complaint Validation"'),
                         ("Content-Type", "text/plain; charset=utf-8")])
@@ -893,6 +1156,10 @@ def app(environ, start_response):
     conn = db()
     try:
         cur = conn.cursor()
+        # One context object for every page: who is signed in, and how fresh the
+        # data is. The freshness strip goes on every screen because a stale number
+        # is worse than no number.
+        ctx = {"who": who, "banner": banner_html(refresh_status(cur))}
 
         if method == "POST" and path.startswith("/review/"):
             try:
@@ -900,15 +1167,15 @@ def app(environ, start_response):
             except ValueError:
                 start_response("404 Not Found", [("Content-Type", "text/plain")])
                 return [b"bad id"]
-            m, e = do_review(cur, rid, parse_form(environ))
+            m, e = do_review(cur, rid, parse_form(environ), who)
             return redirect(start_response, f"/review/{rid}", m, e)
 
         if method == "POST" and path == "/codes":
-            m, e = do_code(cur, parse_form(environ))
+            m, e = do_code(cur, parse_form(environ), who)
             return redirect(start_response, "/codes", m, e)
 
         if method == "POST" and path == "/quality":
-            m, e = do_quality(cur, environ)
+            m, e = do_quality(cur, environ, who)
             return redirect(start_response, "/quality", m, e)
 
         if path == "/export.csv":
@@ -917,22 +1184,22 @@ def app(environ, start_response):
             return [body]
 
         if path == "/reviews":
-            html = p_reviews(cur, q, msg)
+            html = p_reviews(cur, q, msg, ctx)
         elif path.startswith("/review/"):
             try:
                 rid = int(path.rsplit("/", 1)[1])
             except ValueError:
                 start_response("404 Not Found", [("Content-Type", "text/plain")])
                 return [b"bad id"]
-            html = p_review(cur, rid, q, msg, err)
+            html = p_review(cur, rid, q, msg, err, ctx)
         elif path == "/codes":
-            html = p_codes(cur, q, msg)
+            html = p_codes(cur, q, msg, ctx)
         elif path == "/quality":
-            html = p_quality(cur, q, msg)
+            html = p_quality(cur, q, msg, ctx)
         elif path == "/monthly":
-            html = p_monthly(cur, q, msg)
+            html = p_monthly(cur, q, msg, ctx)
         else:
-            html = p_dashboard(cur, q, msg)
+            html = p_dashboard(cur, q, msg, ctx)
 
         start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
         return [html.encode("utf-8")]
@@ -941,9 +1208,9 @@ def app(environ, start_response):
 
 
 if __name__ == "__main__":
-    if not APP_PASS:
+    if not any(u["pw"] for u in USERS.values()):
         sys.exit("APP_PASS not set — refusing to serve without a password")
     port = int(os.environ.get("APP_PORT", "8080"))
     host = os.environ.get("APP_HOST", "127.0.0.1")
-    print(f"serving on {host}:{port} as {APP_USER}")
+    print(f"serving on {host}:{port} as {', '.join(sorted(USERS))}")
     make_server(host, port, app).serve_forever()

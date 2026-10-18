@@ -68,6 +68,9 @@ CXAPP_DB_HOST=$DBH
 CXAPP_DB_USER=$DBU
 CXAPP_DB_PASSWORD=$DBP
 CXAPP_DB_NAME=$DBN
+# One login. For more reviewers replace these three with a single line:
+#   APP_USERS=chadia:1089:<pw>,philip:1001:<pw>
+# and every decision is then stamped with the person who made it (see README).
 APP_USER=chadia
 APP_PASS=$PASS
 APP_REVIEWER_UID=1089
