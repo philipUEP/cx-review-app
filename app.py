@@ -484,6 +484,12 @@ def build_where(q):
         where.append("v.has_prose=0")
     elif txt == "prose":
         where.append("v.has_prose=1")
+    if q.get("dup") == "1":
+        # One row per repeated review (same text, SKU and date). Never applied
+        # unless asked for: the default counts every row and discloses the
+        # repeats, because a silent dedupe would change every number on the page
+        # without telling the reader.
+        where.append("v.dup_rank=1")
     return ("WHERE " + " AND ".join(where)) if where else "", args
 
 
@@ -623,12 +629,18 @@ def _corpus_range(cur):
     return r["a"], r["b"]
 
 
-def mix_window(q, months, lo, hi):
+def mix_window(q, plot, lo, hi):
     """(start, end, basis) for the change column.
 
+    `plot` is the TRIMMED, contiguous month list the series draws — never the raw
+    list of months present. A filter with one stray 2025-07 row used to stretch
+    the default window over 396 days for a two-month chart, which suppressed
+    every arrow as thin; the window now comes from the months that are actually
+    plotted, and the last three of those are contiguous by construction.
+
     Explicit dates win; a month filter means that month; neither means the last
-    three months present in the filtered set, and the page says so. A delta
-    against a window the reader has to guess is not evidence.
+    three months plotted here, and the page says so. A delta against a window the
+    reader has to guess is not evidence.
     """
     f, t = _d(q.get("from")), _d(q.get("to"))
     if (f or t) and lo and hi:
@@ -637,7 +649,7 @@ def mix_window(q, months, lo, hi):
         a, b = _month_bounds(q["month"])
         if a:
             return a, b, f"month {q['month']}"
-    keys = [m for m, _ in months if m][-3:]
+    keys = [m for m, _ in plot if m][-3:]
     if keys:
         a, _ = _month_bounds(keys[0])
         _, b = _month_bounds(keys[-1])
@@ -653,17 +665,33 @@ def prior_window(f, t):
     return pt - timedelta(days=span - 1), pt, span
 
 
-def _delta_cell(cur_n, prev_n, title=""):
-    """One change cell. cur_n MUST be counted over the same window as prev_n:
-    an all-time numerator against a windowed denominator is a percentage of
-    nothing (810 all-time vs 210 before read as +286% when the window held 600,
-    i.e. +186%)."""
+def _pct(cur_n, prev_n, cur_days, prev_days):
+    """Percentage change between two RATES, or None when a rate is impossible."""
+    if not cur_days or not prev_days or not prev_n:
+        return None
+    return ((cur_n / cur_days) / (prev_n / prev_days) - 1) * 100.0
+
+
+def _delta_cell(cur_n, prev_n, cur_days, prev_days, title=""):
+    """One change cell, as a change in RATE PER DAY WITH DATA.
+
+    Both counts MUST come from their own window, and both windows MUST be
+    divided by the days they actually hold data for. The corpus starts
+    2026-06-01, so "the 80 days before 2026-08-01" holds only 61 dates with data:
+    dividing by 80 made a 61-day baseline look like an 80-day one and inflated
+    every default-page percentage (+86% displayed where the rates say +41.6%),
+    and flipped the sign on three codes (Too Big displayed +9%, rates say -17.1%).
+    """
     if prev_n is None:
         return ""
     tt = f' title="{esc(title)}"' if title else ""
+    if not cur_days or not prev_days:
+        return f'<span class="dl flat"{tt}>—</span>' if (cur_n or prev_n) else ""
     if not prev_n:
         return (f'<span class="dl new"{tt}>new</span>') if cur_n else ""
-    pct = (cur_n - prev_n) * 100.0 / prev_n
+    pct = _pct(cur_n, prev_n, cur_days, prev_days)
+    if pct is None:
+        return ""
     if abs(pct) < 1:
         return f'<span class="dl flat"{tt}>±0%</span>'
     cls = "up" if pct > 0 else "down"
@@ -782,10 +810,16 @@ def mix_block(cur, q, n):
     to a windowed one, the series counted rows the distribution excludes, and a
     half-finished month was plotted as a whole one. Every count below is now
     taken over the set its heading names.
+
+    The change column is a change in RATE PER DAY WITH DATA (W1): both windows
+    are divided by the number of distinct review dates they hold, because the
+    corpus starts 2026-06-01 and a calendar-day denominator makes a 61-day
+    baseline look like an 80-day one.
     """
     w, args = build_where(q)
     cur.execute(f"""SELECT COALESCE(v.final_complaint, %s) c, COUNT(*) n,
-                           SUM(v.has_prose=0) no_prose, SUM(v.human_validated=1) hv
+                           SUM(v.has_prose=0) no_prose, SUM(v.human_validated=1) hv,
+                           SUM(v.dup_rank > 1) dupes
                       FROM v_ai_complaints v {w}
                      GROUP BY c ORDER BY n DESC""", [NO_CODE] + args)
     dist = cur.fetchall()
@@ -797,19 +831,34 @@ def mix_block(cur, q, n):
     ws = (w + " AND " if w else "WHERE ") + (
         "v.review_date IS NOT NULL AND v.final_complaint IS NOT NULL "
         "AND v.final_complaint <> %s")
-    cur.execute(f"""SELECT DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n
+    cur.execute(f"""SELECT DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n,
+                           COUNT(DISTINCT v.review_date) d
                       FROM v_ai_complaints v {ws}
                      GROUP BY DATE_FORMAT(v.review_date,'%%Y-%%m') ORDER BY 1""",
                 args + [PROCESS_NOISE])
-    months = [(r["m"], int(r["n"])) for r in cur.fetchall() if r["m"]]
+    mrows = cur.fetchall()
+    months = [(r["m"], int(r["n"])) for r in mrows if r["m"]]
+    mdays = {r["m"]: int(r["d"]) for r in mrows if r["m"]}
     plot, omitted = _trim_months(months)
 
+    # W2: the range is the FILTERED range, not the corpus range. A filter whose
+    # data stops on 2026-07-16 used to be plotted with July drawn as a complete
+    # month (and every mid-month filter lost its dashed last point), because the
+    # partial-month test compared the filter to MAX(review_date) over the whole
+    # table.
+    cur.execute(f"""SELECT MIN(v.review_date) lo, MAX(v.review_date) hi
+                      FROM v_ai_complaints v {ws}""", args + [PROCESS_NOISE])
+    rng = cur.fetchone()
+    lo, hi = rng["lo"], rng["hi"]
+    corpus_hi = _corpus_range(cur)[1]
+
     noise = blank = 0
-    bars, nocomment, n_no, n_hv = [], {}, 0, 0
+    bars, nocomment, n_no, n_hv, n_dup = [], {}, 0, 0, 0
     for r in dist:
         c, k = r["c"], int(r["n"])
         n_no += int(r["no_prose"] or 0)
         n_hv += int(r["hv"] or 0)
+        n_dup += int(r["dupes"] or 0)
         if c == NO_CODE:
             blank = k
         elif c == PROCESS_NOISE:
@@ -819,8 +868,10 @@ def mix_block(cur, q, n):
             nocomment[c] = int(r["no_prose"] or 0)
     bars_total = sum(k for _, k in bars)
 
-    lo, hi = _corpus_range(cur)
-    f, t, basis = mix_window(q, months, lo, hi)
+    # W3: the window is built from the TRIMMED contiguous months the chart draws.
+    # Fed the raw month list, one stray 2025-07 row stretched the default window
+    # to 396 days for a two-month chart and suppressed every arrow as thin.
+    f, t, basis = mix_window(q, plot, lo, hi)
     clamped = False
     if f and t and hi and t > hi:
         # A window that ends after the data does not exist: it inflates the
@@ -830,20 +881,37 @@ def mix_block(cur, q, n):
     if f and t and f > t:
         f = t
 
-    def _window_dist(a, b):
+    def _win(a, b):
         qq = {k: v for k, v in q.items() if k not in ("month", "from", "to")}
         qq["from"], qq["to"] = a.isoformat(), b.isoformat()
-        ww, aa = build_where(qq)
+        return build_where(qq)
+
+    def _window_dist(a, b):
+        ww, aa = _win(a, b)
         cur.execute(f"""SELECT COALESCE(v.final_complaint, %s) c, COUNT(*) n
                           FROM v_ai_complaints v {ww} GROUP BY c""", [NO_CODE] + aa)
         return {r["c"]: int(r["n"]) for r in cur.fetchall()}
 
+    def _window_days(a, b):
+        """Distinct review_date values in the window, under the SAME filter.
+
+        This is the denominator of the change column. Counting calendar days
+        instead credits a window with days it has no data for: 2026-05-13 to
+        07-31 is 80 days but only 61 dates with data.
+        """
+        ww, aa = _win(a, b)
+        cur.execute(f"SELECT COUNT(DISTINCT v.review_date) d FROM v_ai_complaints v {ww}", aa)
+        return int(cur.fetchone()["d"] or 0)
+
     curw, prior, pf, pt, span = {}, {}, None, None, 0
+    cur_days = prior_days = 0
     prior_total = cur_total = 0
     if f and t:
         pf, pt, span = prior_window(f, t)
         curw = _window_dist(f, t)
         prior = _window_dist(pf, pt)
+        cur_days = _window_days(f, t)
+        prior_days = _window_days(pf, pt)
         cur_total, prior_total = sum(curw.values()), sum(prior.values())
         if not prior_total:
             prior = {}          # no prior data: show the period, not a wall of "new"
@@ -852,6 +920,12 @@ def mix_block(cur, q, n):
     # or half the current side, the prior window is a coverage artefact and any
     # arrow is noise dressed as a trend (64 vs 1,204 printed ▲10200%).
     thin = bool(prior) and (prior_total < 100 or prior_total < 0.5 * cur_total)
+    # W1's second half: a prior window with materially FEWER days of data than
+    # the current one is the corpus-start artefact. The rate basis above is the
+    # fix for the arithmetic; this flag makes the page say so out loud, because a
+    # reader who assumes two equal calendar windows would read the rate as a
+    # count change (that assumption is what produced +86% instead of +41.6%).
+    daygap = bool(prior) and bool(prior_days) and bool(cur_days) and prior_days < 0.9 * cur_days
     show_delta = bool(prior) and not thin
 
     if not n:
@@ -860,12 +934,23 @@ def mix_block(cur, q, n):
 
     mx = max([k for _, k in bars], default=1) or 1
     top = bars[:12]
+    # W6: the same floor the riser uses. A row of 6 against 1 is not "▲500%"; it
+    # is six reviews. Below the floor the cell says how small the counts are and
+    # prints no percentage at all.
+    floor = max(20, int(math.ceil(0.01 * cur_total))) if cur_total else 20
     rows = []
     for c, k in top:
         if show_delta:
             cv, pv = curw.get(c, 0), prior.get(c, 0)
-            d = _delta_cell(cv, pv, f"{cv:,} in {f.isoformat()}–{t.isoformat()} vs "
-                                    f"{pv:,} in the {span} days before")
+            if max(cv, pv) < floor:
+                ttl = (f"{cv:,} here vs {pv:,} before — below the {floor:,}-review floor, "
+                       f"too small to read as a trend")
+                d = f'<span class="meta" title="{esc(ttl)}">n&lt;{floor:,}</span>'
+            else:
+                d = _delta_cell(cv, pv, cur_days, prior_days,
+                                f"{cv:,} over {cur_days:,} days with data "
+                                f"({cv / max(cur_days, 1):.2f}/day) vs {pv:,} over "
+                                f"{prior_days:,} days ({pv / max(prior_days, 1):.2f}/day)")
         elif f and t:
             d = '<span class="dl flat">—</span>'
         else:
@@ -895,8 +980,9 @@ def mix_block(cur, q, n):
                     f'<td><div class="mixbar noise" style="width:{max(2, int(noise * 100.0 / mx))}%"></div></td><td></td></tr>')
 
     # What grew, ranked by REVIEWS. Maximising relative change names noise: a
-    # 9-vs-3 code (+200%) is not the story next to +214 reviews (+78%).
-    floor = max(20, int(math.ceil(0.01 * cur_total))) if cur_total else 20
+    # 9-vs-3 code (+200%) is not the story next to +214 reviews (+78%). The
+    # percentage beside the count is the same RATE change the table shows, so the
+    # sentence and the column cannot disagree.
     riser = ""
     if show_delta:
         movers = sorted(((curw.get(c, 0) - prior.get(c, 0), c) for c in set(curw) | set(prior)
@@ -906,13 +992,14 @@ def mix_block(cur, q, n):
             parts = []
             for delta, c in up:
                 pv = prior.get(c, 0)
-                pct = f"{delta * 100.0 / pv:+.0f}%" if pv else "new"
+                pct = _pct(delta + pv, pv, cur_days, prior_days)
+                pct = "new" if pct is None else f"{pct:+.0f}%"
                 parts.append(f'<b>{esc(display_label(c))}</b> +{delta:,} ({pct})')
             riser = (f' Biggest increase{"" if len(up) == 1 else "s"} by review count against the '
-                     f'{span} days before: ' + " · ".join(parts) + ".")
+                     f'{prior_days:,} days with data before: ' + " · ".join(parts) + ".")
         else:
-            riser = (f' No complaint grew by {floor:,}+ reviews against the {span} days before, '
-                     f'so nothing here is named as a rise.')
+            riser = (f' No complaint grew by {floor:,}+ reviews against the {prior_days:,} days '
+                     f'with data before, so nothing here is named as a rise.')
 
     # A prior window that holds a fraction of the current one is a coverage
     # artefact: the corpus starts mid-window and the percentages would read as a
@@ -920,18 +1007,30 @@ def mix_block(cur, q, n):
     caveat = ""
     if thin:
         caveat = (f' The preceding period ({pf.isoformat()} to {pt.isoformat()}) holds only '
-                  f'{prior_total:,} reviews against {cur_total:,} here, so no percentage is shown: '
-                  f'the change would be coverage, not trend.')
+                  f'{prior_total:,} reviews over {prior_days:,} day{"s" if prior_days != 1 else ""} '
+                  f'with data against {cur_total:,} here, so no percentage is shown: the change '
+                  f'would be coverage, not trend.')
+    elif daygap:
+        starts = f' (this selection has no reviews before {lo.isoformat()})' if lo and pf and lo > pf else ''
+        caveat = (f' The preceding window holds {prior_days:,} days with data against {cur_days:,} '
+                  f'here{starts}, so every percentage is a change PER DAY WITH DATA, not per '
+                  f'calendar day: an equal-length calendar window would credit the baseline with '
+                  f'days it has no reviews for and inflate every rise.')
 
     when = ""
     if f and t:
-        when = (f' · comparing <b>{f.isoformat()}</b> to <b>{t.isoformat()}</b> against the '
-                f'{span} days before ({pf.isoformat()} to {pt.isoformat()})') if prior else \
+        when = (f' · comparing <b>{f.isoformat()}</b> to <b>{t.isoformat()}</b> '
+                f'({cur_days:,} days with data) against the {prior_days:,} days with data before '
+                f'({pf.isoformat()} to {pt.isoformat()})') if prior else \
                f' · period {f.isoformat()} to {t.isoformat()}'
     elif basis:
         when = f' · period: {esc(basis)}'
-    if clamped and hi:
-        when += f' · data ends {hi.isoformat()}'
+    # W2: the caption names the FILTERED data end, and says when that is earlier
+    # than the corpus, so a short selection cannot read as a stalled corpus.
+    if hi and (clamped or (corpus_hi and hi < corpus_hi)):
+        when += f' · data to {hi.isoformat()}'
+        if corpus_hi and hi < corpus_hi:
+            when += f' (whole corpus to {corpus_hi.isoformat()})'
 
     # prose / validity disclosure: the top answer is a return-reason picklist,
     # and nothing has been human-validated. Both were invisible, so a slide could
@@ -943,43 +1042,71 @@ def mix_block(cur, q, n):
     val = (f' <b>{n_hv:,}</b> of <b>{n:,}</b> rows are human-validated'
            + ('' if n_hv else ' — no count on this page is a validated figure'))
 
-    # Toggles, counted WITHOUT the text/status filter so the numbers describe
-    # what you would get by clicking, not what you already have.
-    qnt = {k: v for k, v in q.items() if k not in ("tx", "status")}
-    wnt, ant = build_where(qnt)
-    cur.execute(f"""SELECT COUNT(*) n, SUM(v.has_prose=1) pr, SUM(v.human_validated=1) hv
-                      FROM v_ai_complaints v {wnt}""", ant)
-    tt = cur.fetchone()
-    tot_n, tot_pr, tot_hv = int(tt["n"] or 0), int(tt["pr"] or 0), int(tt["hv"] or 0)
-
+    # Toggles. Every count is computed from the EXACT dict its link carries, so a
+    # count can never describe a different row set than the page it opens. (W5:
+    # the strip dropped `status` while the link kept it, so
+    # /reviews?family=Seat+cushions&status=flagged offered "all rows 1,571"
+    # linking to a page of 137.)
     def _tog(label, over, on):
         d = {k: v for k, v in q.items() if k not in ("page", "msg", "err")}
         d.update(over)
+        d = {k: v for k, v in d.items() if v not in (None, "")}
+        ww, aa = build_where(d)
+        cur.execute(f"SELECT COUNT(*) n FROM v_ai_complaints v {ww}", aa)
+        k = int(cur.fetchone()["n"] or 0)
         cls = ' class="on"' if on else ""
-        return f'<a href="/reviews?{esc(qstr(d))}"{cls}>{label}</a>'
+        return f'<a href="/reviews?{esc(qstr(d))}"{cls}>{label} {k:,}</a>'
 
-    togs = (f'{_tog(f"all rows {tot_n:,}", {"tx": ""}, not q.get("tx"))} · '
-            f'{_tog(f"with a comment {tot_pr:,}", {"tx": "prose"}, q.get("tx") == "prose")} · '
-            f'{_tog(f"picklist only {tot_n - tot_pr:,}", {"tx": "codeonly"}, q.get("tx") == "codeonly")} · '
-            f'{_tog(f"human-validated only {tot_hv:,}", {"status": "decided"}, q.get("status") == "decided")}')
+    deduped = q.get("dup") == "1"
+    togs = (f'{_tog("all rows", {"tx": ""}, not q.get("tx"))} · '
+            f'{_tog("with a comment", {"tx": "prose"}, q.get("tx") == "prose")} · '
+            f'{_tog("picklist only", {"tx": "codeonly"}, q.get("tx") == "codeonly")} · '
+            f'{_tog("human-validated only", {"status": "decided"}, q.get("status") == "decided")} · '
+            f'{_tog("count every row" if deduped else "distinct complaints", {"dup": "" if deduped else "1"}, False)}')
+
+    # W8: duplicated review rows are disclosed, never silently collapsed. The
+    # flag is 'same MD5(text), SKU and review_date' (view: dup_rank/dup_group).
+    if deduped:
+        qd = {k: v for k, v in q.items() if k != "dup"}
+        wd, ad = build_where(qd)
+        cur.execute(f"SELECT COUNT(*) n FROM v_ai_complaints v {wd}", ad)
+        hidden = max(0, int(cur.fetchone()["n"] or 0) - n)
+        plural = hidden != 1
+        dupnote = (f' <b>{hidden:,}</b> ' + ("rows that repeat" if plural else "row that repeats") +
+                   " a review already counted for the same SKU on the same date " +
+                   ("are" if plural else "is") +
+                   " hidden by this view — one row per review, applied on request and named here")
+    elif n_dup:
+        plural = n_dup != 1
+        dupnote = (f' <b>{n_dup:,}</b> ' + ("rows repeat" if plural else "row repeats") +
+                   " a review already counted for the same SKU on the same date; " +
+                   ("they are counted" if plural else "it is counted") + ", not removed — "
+                   f'<a href="/reviews?{esc(qstr(q, dup="1", page=""))}">show {n - n_dup:,} distinct '
+                   f'complaints</a>')
+    else:
+        dupnote = ' No row repeats another review on the same SKU and date.'
 
     # The last point is a partial month: say so and give the daily rate, because
-    # a short month looks like a fall.
+    # a short month looks like a fall. The rate is per day WITH DATA, the same
+    # basis as the change column.
     part = None
     if plot and hi and plot[-1][0] == f"{hi.year:04d}-{hi.month:02d}" and hi.day < _month_days(plot[-1][0]):
         part = hi.day
     partnote = ""
     if part and len(plot) > 1:
         pm, pn = plot[-2]
-        pd = _month_days(pm) or 1
-        partnote = (f' {MN[int(plot[-1][0][5:7]) - 1]} is drawn dashed because the data stops on the '
-                    f'{_ord(part)}: {plot[-1][1]:,} reviews in {part} days is '
-                    f'{plot[-1][1] / part:.1f}/day against {pn / pd:.1f}/day in {MN[int(pm[5:7]) - 1]} — '
-                    f'a short month, not a fall.')
+        pdays = mdays.get(pm) or 1
+        cdays = mdays.get(plot[-1][0]) or part
+        partnote = (f' {MN[int(plot[-1][0][5:7]) - 1]} is drawn dashed because this selection\'s data '
+                    f'stops on the {_ord(part)}: {plot[-1][1]:,} reviews on {cdays} day'
+                    f'{"s" if cdays != 1 else ""} with data is {plot[-1][1] / cdays:.1f}/day against '
+                    f'{pn / pdays:.1f}/day in {MN[int(pm[5:7]) - 1]} — a short month, not a fall.')
 
     hdr = ('complaint · reviews · share of matches'
-           + (f' · change vs the {span} days before' if show_delta else '')
-           + ('' if show_delta or not (f and t) else ' · change withheld (thin prior period)'))
+           + (f' · change per day with data vs the {prior_days:,} days before' if show_delta else '')
+           + (' · no earlier reviews here, so there is nothing to compare'
+              if (f and t and not prior)
+              else ('' if show_delta or not (f and t) else ' · change withheld (thin prior period)')))
 
     return f"""<div class="mix">
   <div class="mixhead"><h2>Complaint mix</h2>
@@ -1000,7 +1127,7 @@ def mix_block(cur, q, n):
   <p class="mixnote"><b>{n:,}</b> rows match · <b>{bars_total:,}</b> are complaints · {blank:,} carry no
   complaint · {noise:,} are process noise (Review Deletion) shown for reconciliation only and kept out of the
   distribution.{riser}{caveat}</p>
-  <p class="mixnote">{disc}.{val}.</p>
+  <p class="mixnote">{disc}.{val}.{dupnote}</p>
 </div>"""
 
 
@@ -1320,8 +1447,8 @@ def do_review(cur, rid, f, who):
 
 PAGE_ROLLUP = 200
 MONTHLY_COLS = ["month", "quarter", "product_family", "product", "parent", "sku", "asin", "title",
-                "complaint", "complaint_display", "category", "n", "pct_of_sku_month",
-                "n_human_validated"]
+                "title_short", "complaint", "complaint_display", "category", "n",
+                "pct_of_sku_month", "n_human_validated"]
 
 
 def month_grain(v):
@@ -1404,7 +1531,7 @@ def p_monthly(cur, q, msg="", ctx=None):
     off = (pg - 1) * PAGE_ROLLUP
     cur.execute(f"""SELECT month, quarter, product_family, product, parent, sku, asin,
                            complaint, category, n, pct_of_sku_month, n_human_validated,
-                           LEFT(COALESCE(title,''),70) title
+                           LEFT(COALESCE(title,''),70) title, title_short
                       FROM v_ai_complaints_monthly {w}
                      ORDER BY month DESC, n DESC, sku, complaint
                      LIMIT {PAGE_ROLLUP} OFFSET {off}""", args)
@@ -1414,7 +1541,7 @@ def p_monthly(cur, q, msg="", ctx=None):
         <td>{esc(r["product"] or "—")}<div class="title">{esc(r["title"] or "")}</div></td>
         <td>{esc(r["product_family"] or "—")}</td>
         <td class="mono">{esc(r["parent"] or "—")}</td>
-        <td>{amz_sku(r["sku"])}</td>
+        <td>{amz_sku(r["sku"])}{f'<div class="title">{esc(r["title_short"])}</div>' if r["title_short"] else ""}</td>
         <td>{esc(display_label(r["complaint"]))}</td><td class="meta">{esc(r["category"] or "")}</td>
         <td class="mono num">{r["n"]:,}</td><td class="mono num">{r["pct_of_sku_month"]}%</td>
         <td class="mono num">{int(r["n_human_validated"] or 0):,}</td></tr>""" for r in rows)
@@ -1461,7 +1588,7 @@ where the same filters also show the complaint mix.{grain_note}</p>
 def monthly_csv(cur, q):
     w, args = build_where_monthly(q)
     cur.execute(f"""SELECT month, quarter, product_family, product, parent, sku, asin, title,
-                           complaint, category, n, pct_of_sku_month, n_human_validated
+                           title_short, complaint, category, n, pct_of_sku_month, n_human_validated
                       FROM v_ai_complaints_monthly {w}
                      ORDER BY month DESC, n DESC, sku, complaint""", args)
     buf = io.StringIO()
@@ -1619,6 +1746,11 @@ def ensure_sample(cur):
     the ISO week so the same week always gives the same sample. Persisted because
     the pool moves as corrections land: a replay would swap rows out from under
     the checker mid-week.
+
+    The pool is rows with a CUSTOMER COMMENT (`has_prose=1`). 8,475 of 22,187 rows
+    carry only the return-reason picklist, so a sample drawn from everything was
+    38% uncheckable: the checker is asked to grade a label against 'Too big'.
+    Stratification is unchanged; only the pool it draws from is now checkable.
     """
     wk = iso_week()
     cur.execute("SELECT COUNT(*) n FROM weekly_samples WHERE sample_week=%s", (wk,))
@@ -1626,7 +1758,8 @@ def ensure_sample(cur):
         return wk
     cur.execute("""SELECT review_id, COALESCE(final_category,'Uncategorised') cat
                      FROM v_ai_complaints
-                    WHERE review_date IS NOT NULL AND final_complaint IS NOT NULL""")
+                    WHERE review_date IS NOT NULL AND final_complaint IS NOT NULL
+                      AND has_prose=1""")
     pool = cur.fetchall()
     if not pool:
         return wk
@@ -1658,11 +1791,22 @@ def ensure_sample(cur):
 
 
 def sample_stats(rows):
-    acc = sum(1 for r in rows if r["your_call"] and norm(r["your_call"]) == norm(r["ai_complaint"]))
-    cor = sum(1 for r in rows if r["your_call"] and NOT_A_COMPLAINT not in norm(r["your_call"])
+    """Agreement over the rows that can actually be CHECKED.
+
+    A row with no customer comment (has_prose=0) holds the return-reason picklist
+    as its whole text — there is nothing to check the label against, so it cannot
+    be evidence either way and is kept out of the denominator (and named).
+    The pool is prose-only now, but a week drawn before that change still carries
+    code-only rows; excluding them from the arithmetic is what stops 18 of 45
+    uncheckable rows from being scored as if they were agreement.
+    """
+    usable = [r for r in rows if int(r.get("has_prose") or 0) == 1]
+    skipped = len(rows) - len(usable)
+    acc = sum(1 for r in usable if r["your_call"] and norm(r["your_call"]) == norm(r["ai_complaint"]))
+    cor = sum(1 for r in usable if r["your_call"] and NOT_A_COMPLAINT not in norm(r["your_call"])
               and norm(r["your_call"]) != norm(r["ai_complaint"]))
-    rej = sum(1 for r in rows if r["your_call"] and NOT_A_COMPLAINT in norm(r["your_call"]))
-    return acc, cor, rej, acc + cor     # rejected rows leave the denominator
+    rej = sum(1 for r in usable if r["your_call"] and NOT_A_COMPLAINT in norm(r["your_call"]))
+    return acc, cor, rej, acc + cor, skipped   # rejected rows leave the denominator
 
 
 def sample_rows(cur, wk):
@@ -1681,25 +1825,27 @@ def record_sample(cur, wk, sample_by=None):
     """Roll the filled calls into quality_checks. Under 5 calls is progress, not a
     measurement: recording 100% on n=1 would put a meaningless point on the trend."""
     rows = sample_rows(cur, wk)
-    acc, cor, rej, n = sample_stats(rows)
+    acc, cor, rej, n, skipped = sample_stats(rows)
     if n < 5:
         return None
     pct = round(acc * 100.0 / n, 2)
+    note = (f"weekly random sample: {acc} agreed, {cor} corrected, {rej} removed "
+            f"(excluded from the denominator)")
+    if skipped:
+        note += f"; {skipped} code-only row(s) excluded (nothing to check)"
     cur.execute("""INSERT INTO quality_checks (week_start, sample_n, agreement_pct, checked_by, sample_ref, note)
                    VALUES (%s,%s,%s,%s,%s,%s)
                    ON DUPLICATE KEY UPDATE sample_n=VALUES(sample_n),
                      agreement_pct=VALUES(agreement_pct), sample_ref=VALUES(sample_ref),
                      note=VALUES(note)""",
-                (week_start(), n, pct, sample_by, f"weekly-{wk}",
-                 f"weekly random sample: {acc} agreed, {cor} corrected, {rej} removed "
-                 f"(excluded from the denominator)"))
+                (week_start(), n, pct, sample_by, f"weekly-{wk}", note))
     return pct
 
 
 def p_quality(cur, q, msg="", ctx=None):
     wk = ensure_sample(cur)
     rows = sample_rows(cur, wk)
-    acc, cor, rej, n = sample_stats(rows)
+    acc, cor, rej, n, skipped = sample_stats(rows)
     pct = record_sample(cur, wk, (ctx or {}).get('who', {}).get('uid'))
     filled = acc + cor + rej
 
@@ -1735,18 +1881,21 @@ def p_quality(cur, q, msg="", ctx=None):
         for c in checks)
 
     if pct is not None:
-        head, note = f"{pct}%", f"n={n} of {len(rows)} called"
+        head, note = f"{pct}%", f"n={n} of {len(rows)} called" + (
+            f" · {skipped} code-only excluded" if skipped else "")
     elif filled:
         head, note = f"{filled}/{len(rows)}", "called — agreement records at 5+"
     else:
         head, note = f"0/{len(rows)}", f"drawn for {wk} — no calls yet"
 
     body = f"""<h1>Quality</h1>
-<p class="sub">The weekly random check: {SAMPLE_N} reviews drawn at random from the whole classified
-corpus, stratified by complaint category so a small but important category is not swamped by FBA returns.
+<p class="sub">The weekly random check: {SAMPLE_N} reviews drawn at random from the classified corpus,
+stratified by complaint category so a small but important category is not swamped by FBA returns.
 Record the call for each row — the agreement is computed from your calls, there is no percentage to type.
-“Not a complaint” leaves the denominator, exactly as in the sheet workflow. Rows marked <b>code only</b>
-carry no customer comment; the sample still includes them, so the number stays unbiased.</p>
+“Not a complaint” leaves the denominator, exactly as in the sheet workflow. The sample is drawn only from
+reviews that carry a <b>customer comment</b>: a row whose whole text is the return-reason picklist gives
+you nothing to check a label against, so it is not drawn — and any code-only row left over from an older
+week is excluded from the agreement and named, rather than scored as a pass or a fail.</p>
 <div class="grid">
   <div class="kpi"><div class="n">{head}</div><div class="l">This week ({esc(wk)})</div><div class="d">{note}</div></div>
   <div class="kpi"><div class="n">{len(checks)}</div><div class="l">Weekly checks logged</div><div class="d">taper record</div></div>
