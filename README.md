@@ -13,7 +13,7 @@ mirror for anyone who only wants to look.
 ```
 app.py                 the review app — the only surface that writes decisions
 deploy_on_box.sh       installs it on ops-automations, nginx on :80 behind the proxy
-pipeline/              everything that produces the numbers (see pipeline/README.md)
+                everything that produces the numbers (see pipeline/README.md)
   cx_refresh.sh          the 30-minute chain: classify -> load -> views -> build -> deploy
   cxvocab.py             the complaint vocabulary and the model prompt
   apply_views.py         all views + assertions on grain and denominators

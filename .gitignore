@@ -5,3 +5,7 @@ __pycache__/
 venv/
 site/
 *.log
+data/v3_output*.csv
+data/review_flags*.csv
+data/backlog_live.json
+data/denied_codes.json

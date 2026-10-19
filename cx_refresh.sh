@@ -22,7 +22,7 @@
 # written to the `runs` table (run_id refresh-<utc>), which is what the
 # "last successful sync" banner on the mirror and in the app reads.
 set -uo pipefail
-cd /opt/data/ai-complaint-validation || exit 1
+cd "$(dirname "$0")" || exit 1
 set -a; . /opt/data/.env; set +a
 export HERMES_HOME=/opt/data
 export PATH="/opt/hermes/tools/uv-0.12.3-linux-x64:$PATH"
