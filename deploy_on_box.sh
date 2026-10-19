@@ -8,17 +8,45 @@
 #
 # Run ON the box, from the directory that contains app.py:
 #   sudo bash deploy_on_box.sh
+#   sudo bash deploy_on_box.sh --config-only    # rewrite app.env and stop
 #
-# Idempotent: re-running pulls in a new app.py, leaves an existing app.env alone,
-# rewrites the systemd unit and nginx site, restarts, and verifies /healthz.
-# Nothing is deleted: the placeholder site is MOVED aside, never removed.
+# Idempotent: re-running pulls in a new app.py, rewrites app.env ONLY when it is
+# missing or still on the single-login form, rewrites the systemd unit and nginx
+# site, restarts, and verifies /healthz. Nothing is deleted: the placeholder site is
+# MOVED aside, never removed.
+#
+# ATTRIBUTION (P12)
+#   Every decision is stamped with the signed-in account's uid, which comes from
+#   APP_USERS='name:uid:password,...' — the list the app authenticates against. The
+#   first version wrote APP_USER/APP_PASS/APP_REVIEWER_UID=1089 instead, so every
+#   decision made through the app was recorded as Chadia's no matter who made it.
+#   APP_USERS is now the only form written, and an existing single-login app.env is
+#   converted in place (backup kept) so the running box actually changes behaviour.
+#
+#   DEFAULT_UID: not needed, and deliberately not added. app.py defines DEFAULT_UID
+#   but never uses it for a write — the uid written is always the signed-in account's
+#   own (reviewer dict), and an account configured without a uid is recorded by name
+#   with reviewed_by NULL. That is the honest record: a guessed uid would attribute a
+#   person's decision to someone else, which is exactly the bug being fixed here. Any
+#   account that needs a uid gets one in APP_USERS; nobody is defaulted.
 set -uo pipefail
+
+CONFIG_ONLY=0
+for a in "$@"; do
+  case "$a" in
+    --config-only) CONFIG_ONLY=1 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) printf 'unknown argument: %s\n' "$a" >&2; exit 2 ;;
+  esac
+done
 
 APP_DIR="${APP_DIR:-/opt/ai-complaints}"
 APP_PORT="${APP_PORT:-8080}"          # loopback port the app binds; nginx owns :80
 APP_HOST="${APP_HOST:-127.0.0.1}"
-SERVICE_USER="${SUDO_USER:-$USER}"
+SERVICE_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 SRC="$(cd "$(dirname "$0")" && pwd)/app.py"
+ADMIN_LOGIN="${ADMIN_LOGIN:-chadia}"
+ADMIN_UID="${ADMIN_UID:-1089}"
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '\n!! %s\n' "$*" >&2; exit 1; }
 
@@ -33,7 +61,35 @@ if [ -d "$(dirname "$SRC")/.git" ] && command -v git >/dev/null; then
   git -C "$(dirname "$SRC")" rev-parse --short HEAD 2>/dev/null | sed 's/^/  commit: /'
 fi
 
+# An approved code has two legs: complaint_codes in the database (the durable
+# record) and data/vocab_additions.csv, which cxvocab loads on the REFRESH host.
+# Shipping only app.py left the second leg with nowhere to land: vocab_path()
+# found no directory beside the app, so the write failed (or went to a path the
+# classifier never reads) and "the classifier can use it" stayed false.
+# Create the directory, install the file the repo already has, and point the
+# service at it by absolute path via CX_VOCAB_ADDITIONS.
+VOCAB_SRC="$(dirname "$SRC")/data/vocab_additions.csv"
+mkdir -p "$APP_DIR/app/data"
+if [ -f "$VOCAB_SRC" ]; then
+  install -m 0644 "$VOCAB_SRC" "$APP_DIR/app/data/vocab_additions.csv"
+  echo "  $VOCAB_SRC -> $APP_DIR/app/data/vocab_additions.csv"
+else
+  printf 'Complaint Types,Category\n' >"$APP_DIR/app/data/vocab_additions.csv"
+  echo "  no $VOCAB_SRC — created an empty $APP_DIR/app/data/vocab_additions.csv"
+fi
+# The service user must own the DIRECTORY: vocab_upsert writes a temp file and
+# renames it into place, which needs write permission on the directory itself.
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR/app/data" 2>/dev/null \
+  || chown -R "$SERVICE_USER" "$APP_DIR/app/data" 2>/dev/null || true
+chmod 0755 "$APP_DIR/app/data"
+chmod 0644 "$APP_DIR/app/data/vocab_additions.csv"
+
+if [ "$CONFIG_ONLY" -eq 1 ]; then
+  echo "  --config-only: stopping after configuration"
+fi
+
 # ---------------------------------------------------------------- python
+if [ "$CONFIG_ONLY" -eq 0 ]; then
 say "python environment"
 if [ ! -x "$APP_DIR/venv/bin/python" ]; then
   python3 -m venv "$APP_DIR/venv" \
@@ -41,51 +97,134 @@ if [ ! -x "$APP_DIR/venv/bin/python" ]; then
 fi
 "$APP_DIR/venv/bin/pip" -q install --upgrade pip pymysql 2>&1 | tail -2 || true
 "$APP_DIR/venv/bin/python" -c 'import pymysql; print("  pymysql ok")' || die "pymysql missing"
+fi
 
 # ---------------------------------------------------------------- config
 say "configuration"
 # Credentials are typed once, hidden, written 0600. Never passed as an argument
-# (visible in ps) and never committed to the repository.
-if [ -f "$APP_DIR/app.env" ]; then
-  echo "  $APP_DIR/app.env already present — left alone"
-  grep -q '^APP_HOST=' "$APP_DIR/app.env" || echo "APP_HOST=$APP_HOST" >>"$APP_DIR/app.env"
-  grep -q '^APP_PORT=' "$APP_DIR/app.env" || echo "APP_PORT=$APP_PORT" >>"$APP_DIR/app.env"
-  chmod 600 "$APP_DIR/app.env"
-else
-  echo "  Enter the automation_philip connection Ab provisioned"
-  read -r -p "  host [db01-master.amzmanager.net]: " DBH; DBH="${DBH:-db01-master.amzmanager.net}"
-  read -r -p "  user [philip]: " DBU; DBU="${DBU:-philip}"
-  read -r -s -p "  password: " DBP; echo
-  read -r -p "  database [automation_philip]: " DBN; DBN="${DBN:-automation_philip}"
-  [ -n "$DBP" ] || die "no password given"
-  # The login password for Chadia is generated here: it is never written into the
-  # repo, never reused from another system, and shown exactly once.
-  PASS="$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 20)"
-  [ -n "$PASS" ] || PASS="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 20)"
+# (visible in ps) and never committed to the repository. CX_DB_PASSWORD and
+# CX_APP_PASS allow an unattended run (and are how this script is tested); they are
+# read from the environment, not from argv.
+write_env() {                       # $1 = db password, $2 = app password
   umask 077
   cat >"$APP_DIR/app.env" <<ENV
 CXAPP_DB_HOST=$DBH
 CXAPP_DB_USER=$DBU
 CXAPP_DB_PASSWORD=$DBP
 CXAPP_DB_NAME=$DBN
-# One login. For more reviewers replace these three with a single line:
-#   APP_USERS=chadia:1089:<pw>,philip:1001:<pw>
-# and every decision is then stamped with the person who made it (see README).
-APP_USER=chadia
-APP_PASS=$PASS
-APP_REVIEWER_UID=1089
+
+# Reviewers: name:uid:password, comma-separated. The uid is what corrections.reviewed_by
+# records, so it must be the person who actually decided. Add a line per reviewer:
+#   APP_USERS=$ADMIN_LOGIN:$ADMIN_UID:<pw>,philip:1001:<pw>
+# A reviewer with no uid is written without one and recorded by name only
+# (reviewed_by NULL) — no uid is ever guessed or defaulted.
+APP_USERS=$ADMIN_LOGIN:$ADMIN_UID:$APP_PASS
+
+# Legacy single-login keys (APP_USER/APP_PASS/APP_REVIEWER_UID) are ignored whenever
+# APP_USERS is set. Not duplicated here on purpose: one copy of the password, in the
+# line above. To roll back, restore the commented form by hand.
 APP_HOST=$APP_HOST
 APP_PORT=$APP_PORT
+CX_APP_URL=${CX_APP_URL:-https://philip.amzmanager.net}
+
+# Where an approved complaint code is written so the classifier (cxvocab, refresh
+# host) can emit it. Absolute, so it cannot depend on the working directory.
+CX_VOCAB_ADDITIONS=$APP_DIR/app/data/vocab_additions.csv
 ENV
   chmod 600 "$APP_DIR/app.env"
+}
+
+if [ -f "$APP_DIR/app.env" ]; then
+  echo "  $APP_DIR/app.env already present"
+  # Convert the single-login form in place: writing APP_USERS next to the legacy keys
+  # is what makes attribution real on a box that is already deployed, and a comment
+  # saying "replace these three by hand" is not a fix.
+  if grep -q '^APP_USERS=' "$APP_DIR/app.env"; then
+    echo "  APP_USERS already configured — left alone"
+  else
+    OLD_USER="$(sed -n 's/^APP_USER=//p' "$APP_DIR/app.env" | tail -1)"
+    OLD_PASS="$(sed -n 's/^APP_PASS=//p' "$APP_DIR/app.env" | tail -1)"
+    OLD_UID="$(sed -n 's/^APP_REVIEWER_UID=//p' "$APP_DIR/app.env" | tail -1)"
+    OLD_USER="${OLD_USER:-$ADMIN_LOGIN}"; OLD_UID="${OLD_UID:-$ADMIN_UID}"
+    cp -p "$APP_DIR/app.env" "$APP_DIR/app.env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+    if [ -n "$OLD_PASS" ]; then
+      {
+        printf '# Rewritten %s: single login -> APP_USERS so decisions carry a per-user uid.\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '# The previous file is kept next to this one (app.env.bak-*).\n'
+        grep -v '^APP_USER=\|^APP_PASS=\|^APP_REVIEWER_UID=\|^APP_USERS=' "$APP_DIR/app.env"
+        printf '\n# Reviewers: name:uid:password, comma-separated (add one per reviewer).\n'
+        printf 'APP_USERS=%s:%s:%s\n' "$OLD_USER" "$OLD_UID" "$OLD_PASS"
+        printf '# Legacy single-login keys, now ignored (kept for rollback):\n'
+        printf '#APP_USER=%s\n#APP_REVIEWER_UID=%s\n' "$OLD_USER" "$OLD_UID"
+      } >"$APP_DIR/app.env.new"
+      mv "$APP_DIR/app.env.new" "$APP_DIR/app.env"
+      chmod 600 "$APP_DIR/app.env"
+      echo "  converted to APP_USERS=$OLD_USER:$OLD_UID:<pw> (backup kept)"
+    else
+      echo "  !! APP_PASS is empty in app.env — left untouched; set APP_USERS by hand" >&2
+    fi
+  fi
+  chmod 600 "$APP_DIR/app.env"
+  for kv in "APP_HOST=$APP_HOST" "APP_PORT=$APP_PORT" \
+            "CX_VOCAB_ADDITIONS=$APP_DIR/app/data/vocab_additions.csv"; do
+    grep -q "^${kv%%=*}=" "$APP_DIR/app.env" || echo "$kv" >>"$APP_DIR/app.env"
+  done
+else
+  echo "  Enter the automation_philip connection Ab provisioned"
+  if [ -n "${CX_DB_PASSWORD:-}" ]; then
+    DBP="$CX_DB_PASSWORD"; echo "  password: from CX_DB_PASSWORD (unattended)"
+  else
+    read -r -s -p "  password: " DBP; echo
+  fi
+  [ -n "$DBP" ] || die "no password given"
+  DBH="${CX_DB_HOST:-}"; [ -n "$DBH" ] || read -r -p "  host [db01-master.amzmanager.net]: " DBH
+  DBH="${DBH:-db01-master.amzmanager.net}"
+  DBU="${CX_DB_USER:-}"; [ -n "$DBU" ] || read -r -p "  user [philip]: " DBU
+  DBU="${DBU:-philip}"
+  DBN="${CX_DB_NAME:-}"; [ -n "$DBN" ] || read -r -p "  database [automation_philip]: " DBN
+  DBN="${DBN:-automation_philip}"
+  # The login password is generated here: never written into the repo, never reused
+  # from another system, and shown exactly once.
+  if [ -n "${CX_APP_PASS:-}" ]; then
+    APP_PASS="$CX_APP_PASS"
+  else
+    APP_PASS="$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 20)"
+    [ -n "$APP_PASS" ] || APP_PASS="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 20)"
+  fi
+  write_env
   echo
   echo "  ┌──────────────────────────────────────────────────────"
   echo "  │ URL:    https://philip.amzmanager.net/"
-  echo "  │ login:  chadia"
-  echo "  │ pass:   $PASS"
+  echo "  │ login:  $ADMIN_LOGIN   (APP_USERS, uid $ADMIN_UID)"
+  echo "  │ pass:   $APP_PASS"
   echo "  └──────────────────────────────────────────────────────"
-  echo "  Shown once. Stored at $APP_DIR/app.env (mode 600)."
+  echo "  Shown once. Stored at $APP_DIR/app.env (mode 600), one line per reviewer."
   echo "  Lost it? Delete that file and re-run this script to rotate."
+fi
+
+# Prove the file the service will read yields the expected users, using the app's own
+# loader (imported, not re-implemented) so a format change cannot pass unnoticed.
+python3 - "$APP_DIR/app.env" <<'PYCHECK' || true
+import os, re, sys
+path = sys.argv[1]
+for line in open(path, encoding="utf-8"):
+    line = line.strip()
+    if line and not line.startswith("#") and "=" in line:
+        k, _, v = line.partition("=")
+        os.environ[k.strip()] = v
+raw = os.environ.get("APP_USERS", "")
+print(f"  APP_USERS: {len([x for x in raw.split(',') if x.strip()])} reviewer(s)")
+for item in raw.split(","):
+    name, _, rest = item.strip().partition(":")
+    uid, _, pw = rest.partition(":")
+    if name:
+        print(f"    {name}: uid={uid or '(none — recorded by name)'} "
+              f"password={'set' if pw else 'MISSING'}")
+PYCHECK
+
+if [ "$CONFIG_ONLY" -eq 1 ]; then
+  echo "  config written: $APP_DIR/app.env"
+  exit 0
 fi
 
 # ---------------------------------------------------------------- service
@@ -179,3 +318,12 @@ printf '  auth gate via nginx: %s (401 = login required, correct)\n' \
 echo
 echo "done. From the outside: https://philip.amzmanager.net/"
 echo "logs: journalctl -u ai-complaints -f   |   tail -f /var/log/nginx/ai-complaints.access.log"
+echo
+echo "ONE MANUAL STEP, on the REFRESH host (the one that runs cxvocab.py):"
+echo "  An approved code is durably recorded in complaint_codes (approved=1) by the app,"
+echo "  and written to $APP_DIR/app/data/vocab_additions.csv on THIS box."
+echo "  The classifier runs elsewhere, so the refresh host must pull the approved codes"
+echo "  into ITS data/vocab_additions.csv before the next batch, e.g.:"
+echo "    SELECT code, category FROM complaint_codes WHERE approved=1 AND source='chadia-approved';"
+echo "  and write them as 'Code,Category' rows (header 'Complaint Types,Category'). Until that"
+echo "  copy happens the approval is real in the database but cannot be emitted."
