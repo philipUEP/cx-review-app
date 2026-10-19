@@ -244,6 +244,7 @@ def derive(cur, q):
     months, plot, lo, hi = series(cur, q)
     f, t = window(q, plot, lo, hi)
     d = {"f": f, "t": t, "lo": lo, "hi": hi}
+    d["plot_months"] = [m for m, _ in plot]
     d["rate_t"] = min(t, TODAY - timedelta(days=1)) if t and t >= TODAY else t
     d["rate_ok"] = bool(f and d["rate_t"] and d["rate_t"] >= f)
     pf, pt, _ = (None, None, 0)
@@ -473,64 +474,85 @@ def case(path, q, want_guard=None, want_lfl=None):
     elif "No units or orders denominator exists" in sec:
         fail(f"{path}: the panel still says no units/orders denominator exists")
     else:
+        # R2: the denominator is the PRODUCT SCOPE with the complaint predicate
+        # removed — every SKU the corpus attributes to the scope, in every month the
+        # records touch — not the SKU-months that happened to record this code.
+        qq = {k: v for k, v in q.items() if k in ("product", "family", "parent", "sku", "skulike")}
+        wq, aq = where(qq)
+        cur.execute(f"SELECT DISTINCT v.sku FROM v_ai_complaints v {wq}"
+                    f"{' AND' if wq else ' WHERE'} v.sku IS NOT NULL", aq)
+        skus = [r["sku"] for r in cur.fetchall()]
         wq, aq = where(q)
-        cur.execute(f"""SELECT COUNT(*) pairs, SUM(s.sku IS NOT NULL) cov,
-                               SUM(s.orders) o
-                          FROM (SELECT v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n
-                                  FROM v_ai_complaints v {wq}
-                                    {"AND" if wq else "WHERE"} v.sku IS NOT NULL
-                                    AND v.review_date IS NOT NULL
-                                    AND v.final_complaint IS NOT NULL
-                                    AND v.final_complaint <> %s
-                                    AND (v.final_category IS NULL OR v.final_category NOT IN
-                                         ('NEW','NO_TEXT','ERR'))
-                                 GROUP BY v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m')) x
+        wx = (wq + " AND " if wq else "WHERE ") + (
+            "v.sku IS NOT NULL AND v.review_date IS NOT NULL "
+            "AND v.final_complaint IS NOT NULL AND v.final_complaint <> %s "
+            "AND (v.final_category IS NULL OR v.final_category NOT IN ('NEW','NO_TEXT','ERR'))")
+        cur.execute(f"""SELECT x.sku, x.m, x.n, s.orders FROM
+                          (SELECT v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n
+                             FROM v_ai_complaints v {wx}
+                            GROUP BY v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m')) x
                           LEFT JOIN sales_by_sku_month s
                                  ON s.sku = x.sku AND s.month = x.m""", aq + [PROCESS_NOISE])
-        e = cur.fetchone()
-        cov, orders = int(e["cov"] or 0), int(e["o"] or 0)
-        flat = htmllib.unescape(re.sub(r"<[^>]+>", " ", sec))
-        if not cov:
-            if "no sales data covers this filter" not in flat:
-                fail(f"{path}: no sales row covers this filter but the panel does not say so")
+        num = cur.fetchall()
+        # Same window the page's chart and rate line describe (the charted months).
+        win = set(d["plot_months"])
+        num = [r for r in num if r["m"] in win]
+        recs = sum(int(r["n"] or 0) for r in num)
+        cov = sum(int(r["n"] or 0) for r in num if (r["orders"] or 0) > 0)
+        cond = sum(int(r["orders"] or 0) for r in num if (r["orders"] or 0) > 0)
+        months = sorted({r["m"] for r in num if r["m"]}) or sorted(win)
+        orders = 0
+        if skus and months:
+            ph = ",".join(["%s"] * len(skus))
+            cur.execute(f"""SELECT COALESCE(SUM(orders),0) o FROM sales_by_sku_month
+                             WHERE sku IN ({ph}) AND month BETWEEN %s AND %s""",
+                        skus + [months[0], months[-1]])
+            orders = int(cur.fetchone()["o"] or 0)
+        # The exposure paragraph only: the chart's tooltips are inside `sec` too and
+        # they carry their own "per 100 orders" numbers.
+        start = sec.find("Sales exposure:")
+        end = sec.find("</p>", start) if start >= 0 else -1
+        flat = htmllib.unescape(re.sub(r"<[^>]+>", " ",
+                                       sec[start:end if end > start else len(sec)]))
+        if not orders:
+            if "sales row" not in flat:
+                fail(f"{path}: no denominator for this filter but the panel does not say why")
             else:
-                ok(f"{path}: exposure — 'no sales data covers this filter' matches 0 covered SKU-months")
-        elif not orders:
-            if "0 orders" not in flat:
-                fail(f"{path}: {cov} covered SKU-month(s) hold 0 orders and the panel hides it")
-            else:
-                ok(f"{path}: exposure — 0-order SKU-months reported as undefined, not 0.00")
+                ok(f"{path}: exposure — no denominator, and the panel says why")
         else:
             mm = re.search(r"([\d,]+)\s+orders and\s+([\d,]+)\s+units across", flat)
             if not mm:
                 fail(f"{path}: exposure line has no orders/units figures")
             elif int(mm.group(1).replace(",", "")) != orders:
-                fail(f"{path}: exposure says {mm.group(1)} orders, SQL says {orders:,}")
+                fail(f"{path}: exposure says {mm.group(1)} orders, the product scope says "
+                     f"{orders:,}")
             else:
-                ok(f"{path}: exposure orders match SQL ({orders:,} across {cov} SKU-month(s))")
+                ok(f"{path}: exposure orders match the product scope ({orders:,} — "
+                   f"complaint predicate removed)")
             rr = re.search(r"([\d.]+)\s+complaint records per 100 orders", flat)
             if not rr:
-                fail(f"{path}: exposure line has no rate")
-            else:
-                cur.execute(f"""SELECT SUM(x.n) n FROM (SELECT v.sku,
-                                      DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n
-                                 FROM v_ai_complaints v {wq}
-                                   {"AND" if wq else "WHERE"} v.sku IS NOT NULL
-                                   AND v.review_date IS NOT NULL
-                                   AND v.final_complaint IS NOT NULL
-                                   AND v.final_complaint <> %s
-                                   AND (v.final_category IS NULL OR v.final_category NOT IN
-                                        ('NEW','NO_TEXT','ERR'))
-                                GROUP BY v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m')) x
-                             JOIN sales_by_sku_month s ON s.sku = x.sku AND s.month = x.m""",
-                            aq + [PROCESS_NOISE])
-                nn = int(cur.fetchone()["n"] or 0)
-                want = 100.0 * nn / orders
-                if abs(float(rr.group(1)) - want) > 0.02:
-                    fail(f"{path}: exposure rate {rr.group(1)} vs SQL {nn}/{orders} = {want:.2f}")
+                if orders < 100:
+                    ok(f"{path}: {orders} orders is below the floor, so no rate is printed (R3)")
                 else:
-                    ok(f"{path}: exposure rate matches SQL ({nn:,} records / {orders:,} orders "
+                    fail(f"{path}: exposure line has no rate")
+            else:
+                want = 100.0 * cov / orders
+                if abs(float(rr.group(1)) - want) > 0.02:
+                    fail(f"{path}: exposure rate {rr.group(1)} vs SQL {cov}/{orders} = {want:.2f}")
+                else:
+                    ok(f"{path}: exposure rate matches SQL ({cov:,} records / {orders:,} orders "
                        f"= {want:.2f} per 100)")
+                # R2: where a code filter narrowed the SKU-months, the conditional
+                # figure must be present AND named as conditional.
+                if q.get("complaint") and cond and cond < orders:
+                    if "among the" not in flat or "that recorded this code" not in flat:
+                        fail(f"{path}: a code filter is on but the conditional figure "
+                             f"({100.0 * cov / cond:.2f} per 100 over {cond:,} orders) is not "
+                             f"labelled 'among the N SKU-months that recorded this code'")
+                    else:
+                        ok(f"{path}: conditional figure labelled "
+                           f"({100.0 * cov / cond:.2f} over the {cond:,} orders in the SKU-months "
+                           f"that recorded this code, vs {100.0 * cov / orders:.2f} on the scope)")
     if not re.search(r"of <b>[\d,]+</b> records carry a customer comment", sec):
         fail(f"{path}: no 'x of y carry a customer comment' line")
     ok(f"{path}: share headline and the exposure line are present")

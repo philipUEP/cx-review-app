@@ -21,7 +21,9 @@ Routes
                     decision that was already made (the new row supersedes, the old
                     one stays as history)
   /monthly          SKU x month x complaint rollup (the PowerBI grain), paginated
-  /monthly.csv      the same rollup, same filters, every row
+  /monthly.csv      the same rollup, same filters; a SKU-month's orders/units/
+                    refunds ride on ONE row (exposure_row=1) so SUM is correct
+  /monthly_sku.csv  one row per SKU-month — the pivot export (R1)
   /rules            the picklist -> code mapping, published for review: it labels the
                     8,516 records no prose sample can reach
   /codes            proposed codes: approve (joins the vocabulary AND the classifier's
@@ -910,11 +912,30 @@ def _month_days(m):
     return b.day if b else 0
 
 
-def _mix_svg(points, partial_day=None):
-    """One line, one point per month, server-side SVG — no JS dependency.
+def _nice_axis(v):
+    """A readable top-of-axis value: 1, 2, 2.5, 5 x 10^k, never 1.37."""
+    if v <= 0:
+        return 1
+    import math as _m
+    k = 10 ** int(_m.floor(_m.log10(v)))
+    for mult in (1, 2, 2.5, 5, 10):
+        if v <= mult * k * 1.0001:
+            return mult * k
+    return 10 * k
+
+
+def _mix_svg(points, partial_day=None, rate=None, breaks=()):
+    """Two series, one point per month, server-side SVG — no JS dependency.
 
     points: [(month 'YYYY-MM', n)]. data-points carries the count so a test can
     assert the series length without parsing the path.
+    rate:   {month: complaints per 100 orders} or None — drawn on a RIGHT axis as a
+            dashed second series (R10). The counts alone can rise while the rate
+            falls (a launch, a promotion, a harvest); the rate is the line that
+            answers "is it up?".
+    breaks: month indices where the set of contributing feeds changes. Those months
+            are shaded and marked with a dashed rule, because a rate whose
+            composition changed is not comparable with the month before it (R4).
 
     A month that is still running is drawn as a DASHED last segment and labelled
     '(to the 19th)'. Plotting the 19 days of October as a whole month made a flat
@@ -923,7 +944,7 @@ def _mix_svg(points, partial_day=None):
     """
     if not points:
         return ""
-    W, H, L, R, T, B = 520, 172, 36, 14, 14, 26
+    W, H, L, R, T, B = 520, 172, 36, 40, 14, 26
     iw, ih = W - L - R, H - T - B
     mx = max(n for _, n in points) or 1
     n = len(points)
@@ -946,6 +967,50 @@ def _mix_svg(points, partial_day=None):
         line += (f'<polyline points="{xs[-2]:.1f},{ys[-2]:.1f} {xs[-1]:.1f},{ys[-1]:.1f}" '
                  f'fill="none" stroke="#2b5cff" stroke-width="2" stroke-dasharray="4 3" '
                  f'stroke-linecap="round"/>')
+
+    # ---- feed-mix changes: shade the month and mark the boundary --------------
+    bands = ""
+    half = (iw / max(n - 1, 1)) / 2
+    for i in sorted({b for b in breaks if 0 <= b < n}):
+        x0, x1 = max(L, xs[i] - half), min(W - R, xs[i] + half)
+        bands += (f'<rect x="{x0:.1f}" y="{T}" width="{max(x1 - x0, 2):.1f}" height="{ih:.1f}" '
+                  f'fill="#f59e0b" opacity=".10"/>'
+                  f'<line x1="{xs[i]:.1f}" y1="{T}" x2="{xs[i]:.1f}" y2="{T + ih:.1f}" '
+                  f'stroke="#b45309" stroke-width="1" stroke-dasharray="3 3" opacity=".55"/>')
+
+    # ---- the rate series, right axis ----------------------------------------
+    rline = ""
+    if rate:
+        vals = [rate.get(m) for m, _ in points]
+        live = [v for v in vals if v is not None]
+        if live:
+            mxr = _nice_axis(max(live))
+            yr = lambda v: T + ih - (v / mxr) * ih  # noqa: E731
+            rline += (f'<text x="{W - R + 5}" y="{T + 4}" font-size="9.5" fill="#b45309">{mxr:g}</text>'
+                      f'<text x="{W - R + 5}" y="{T + ih + 3}" font-size="9.5" fill="#b45309">0</text>')
+            seg = []
+            segs = []
+            for i, v in enumerate(vals):
+                if v is None:
+                    if seg:
+                        segs.append(seg)
+                    seg = []
+                else:
+                    seg.append((xs[i], yr(v)))
+            if seg:
+                segs.append(seg)
+            for s in segs:
+                if len(s) > 1:
+                    rline += (f'<polyline points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in s)}" '
+                              f'fill="none" stroke="#b45309" stroke-width="1.8" '
+                              f'stroke-dasharray="5 3" stroke-linejoin="round"/>')
+            for i, v in enumerate(vals):
+                if v is None:
+                    continue
+                rline += (f'<circle cx="{xs[i]:.1f}" cy="{yr(v):.1f}" r="2.6" fill="#b45309">'
+                          f'<title>{points[i][0]}: {v:.2f} per 100 orders'
+                          f'{"; feeds changed here" if i in breaks else ""}</title></circle>')
+
     dots, labels = "", ""
     step = 1 if n <= 8 else max(1, n // 8)
     for i, (m, v) in enumerate(points):
@@ -966,111 +1031,340 @@ def _mix_svg(points, partial_day=None):
             else:
                 labels += (f'<text x="{x:.1f}" y="{H - 8}" text-anchor="middle" font-size="9.5" '
                            f'fill="#9ca3af">{esc(mlab)}</text>')
-    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Complaints per month" '
-            f'data-points="{n}" data-partial="{partial_day or 0}" '
-            f'style="width:100%;height:auto;display:block">{grid}{lab}{area}{line}{dots}{labels}</svg>')
+    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Complaints per month, and per 100 orders" '
+            f'data-points="{n}" data-partial="{partial_day or 0}" data-breaks="{len(list(breaks))}" '
+            f'style="width:100%;height:auto;display:block">'
+            f'{bands}{grid}{lab}{area}{line}{rline}{dots}{labels}</svg>')
 
 
-def exposure(cur, q, monthly=False):
-    """Orders/units behind the records THIS filter selects — the denominator.
+# Must equal apply_views.RATE_FLOOR. A rate quoted below it is arithmetic on a
+# handful of orders, not a level: /monthly?sku=S-Hum printed 200.00 per 100
+# orders because one 0-order month contributed a complaint and the other month
+# supplied the single order it was divided by.
+RATE_FLOOR = 100
 
-    Grouping the filtered records to (sku, month) and joining the sales table on
-    that pair is deliberate: a filter for one complaint code then divides by the
-    orders that could have produced that code, not by the whole catalogue's sales.
-    The numerator and the denominator therefore always describe the same
-    SKU-months, and the fraction of records without a sales row is measured
-    (`recs` vs `recs_cov`) instead of being assumed away.
+
+def _scope_where(q):
+    """The PRODUCT predicates of a filter, and nothing else (R2).
+
+    The complaint predicate is deliberately absent: a rate conditioned on the
+    complaint can only ever divide by the orders that produced that complaint, so
+    "Too Firm, seat cushions, July" was 27 records over the 26,107 orders in the 7
+    SKU-months that happened to record it, against a family total of 32,848 — a
+    0.10 that read 25.8% higher than the true 0.08. Every order in the family could
+    have produced a Too Firm complaint, so every one of them belongs in the
+    denominator. Same for source and country: a complaint from one feed or one
+    marketplace can come from any order, so neither narrows the exposure.
+    """
+    where, args = [], []
+    if q.get("product"):
+        where.append("(product LIKE %s OR title LIKE %s)")
+        args += [f'%{q["product"]}%'] * 2
+    if q.get("family"):
+        where.append("product_family=%s"); args.append(q["family"])
+    if q.get("parent"):
+        where.append("parent=%s"); args.append(q["parent"])
+    if q.get("sku"):
+        if q.get("skulike") == "1":
+            where.append("sku LIKE %s"); args.append(f'%{q["sku"]}%')
+        else:
+            where.append("sku=%s"); args.append(q["sku"].strip())
+    return ("WHERE " + " AND ".join(where)) if where else "", args
+
+
+def scope_skus(cur, q):
+    """Every SKU the corpus attributes to this product scope, in ANY month.
+
+    Not just the SKUs that complained in the months in view: a family's August
+    orders include the SKU that recorded nothing in August. Taking the SKU set from
+    the whole rollup and then summing sales for all of it is what makes the family
+    denominator 39,390 for August instead of the 38,513 that a complaint-conditioned
+    join produced.
+
+    The boundary this cannot cross: a SKU that has never appeared in a complaint
+    cannot be attributed to a family from this database, so its orders are not in
+    any family denominator. That is a known, small omission and it is documented.
+    """
+    w, args = _scope_where(q)
+    cur.execute(f"SELECT DISTINCT sku FROM v_ai_complaints_monthly {w}"
+                f"{' AND' if w else ' WHERE'} sku IS NOT NULL", args)
+    return [r["sku"] for r in cur.fetchall()]
+
+
+def month_orders(cur, q, months):
+    """{month: orders} for the product scope — the denominator, all SKUs, no code.
+
+    One row per (sku, month) in sales_by_sku_month, summed once per month, so no
+    complaint code can multiply it.
+    """
+    skus = scope_skus(cur, q)
+    if not skus or not months:
+        return {}
+    ph = ",".join(["%s"] * len(skus))
+    cur.execute(f"""SELECT month, SUM(orders) orders, SUM(units) units,
+                           SUM(refunds_us) refunds_us, SUM(orders_us) orders_us,
+                           COUNT(*) sku_months, SUM(orders = 0) zero_months
+                      FROM sales_by_sku_month
+                     WHERE sku IN ({ph}) AND month BETWEEN %s AND %s
+                     GROUP BY month""", skus + [months[0], months[-1]])
+    return {r["month"]: r for r in cur.fetchall()}
+
+
+def exposure(cur, q, monthly=False, months=None):
+    """Orders/units behind the PRODUCT FILTER — the denominator (R2, R3).
+
+    Two queries, on purpose:
+
+      1. the numerator: the filter AS ASKED (complaint code included), at
+         (sku, month), LEFT JOINed to sales so the excluded records can be counted
+         rather than silently dropped;
+      2. the denominator: the same product scope with the complaint predicate
+         REMOVED, every SKU the corpus knows for that scope, every month in
+         `months`, including SKU-months that recorded nothing.
+
+    `months` is the window the figure describes (a list of 'YYYY-MM'). It matters:
+    the corpus holds a handful of 2023–2025 stragglers, and dividing a five-month
+    selection by four years of orders reports the CORPUS's coverage as a rate.
+    The caller passes the window it is describing — the charted months on
+    /reviews, the months of the selection on /monthly — and any record outside it
+    is counted as `outside`, never silently divided.
 
     `monthly=True` reads the month-grain rollup (for /monthly, whose from/to are
-    months, not dates); the default reads the record grain (for /reviews, where
-    the filter is a day range and the records are what the panel shows).
-
-    Every value is NULL-safe: SUM() over a LEFT JOIN with no match returns NULL,
-    and callers must treat that as "no exposure", never as zero orders.
+    months, not dates); the default reads the record grain (for /reviews).
     """
     if monthly:
         w, args = build_where_monthly(q)
-        src = (f"SELECT sku, month AS m, SUM(n_complaints) n "
-               f"FROM v_complaint_rates {w} GROUP BY sku, month")
+        num = (f"SELECT sku, month AS m, SUM(n_complaints) n FROM v_complaint_rates {w} "
+               f"GROUP BY sku, month")
     else:
         w, args = build_where(q)
         # The numerator is COMPLAINT RECORDS, the same set v_ai_complaints_monthly
         # counts: a resolved complaint, not 'Review Deletion', not an unusable
         # category. Without this clause /reviews rated 472 records against the 468
-        # /monthly shows for the same filter, and the two pages disagreed on the
-        # rate for identical filters.
+        # /monthly shows for the same filter.
         wx = (w + " AND " if w else "WHERE ") + (
             "v.sku IS NOT NULL AND v.review_date IS NOT NULL "
             "AND v.final_complaint IS NOT NULL AND v.final_complaint <> %s "
             "AND (v.final_category IS NULL OR v.final_category NOT IN ('NEW','NO_TEXT','ERR'))")
         args = args + [PROCESS_NOISE]
-        src = (f"SELECT v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n "
+        num = (f"SELECT v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n "
                f"FROM v_ai_complaints v {wx} "
                f"GROUP BY v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m')")
-    cur.execute(f"""SELECT COUNT(*) pairs,
-                           SUM(s.sku IS NOT NULL) covered_pairs,
-                           SUM(x.n) recs,
-                           SUM(CASE WHEN s.sku IS NOT NULL THEN x.n ELSE 0 END) recs_cov,
-                           SUM(s.orders) orders, SUM(s.units) units,
-                           SUM(s.refunds) refunds,
-                           SUM(CASE WHEN s.sku IS NOT NULL AND s.orders = 0
-                                    THEN 1 ELSE 0 END) zero_months
-                      FROM ({src}) x
+    cur.execute(f"""SELECT x.sku, x.m, x.n, s.orders, s.units, s.refunds_us, s.orders_us
+                      FROM ({num}) x
                       LEFT JOIN sales_by_sku_month s
                              ON s.sku = x.sku AND s.month = x.m""", args)
-    return cur.fetchone()
+    rows = cur.fetchall()
+
+    outside = 0
+    if months:
+        keep = set(months)
+        outside = sum(int(r["n"] or 0) for r in rows if r["m"] not in keep)
+        rows = [r for r in rows if r["m"] in keep]
+    else:
+        months = sorted({r["m"] for r in rows if r["m"]})
+
+    recs = sum(int(r["n"] or 0) for r in rows)
+    nosales = sum(int(r["n"] or 0) for r in rows if r["orders"] is None)
+    zero = sum(int(r["n"] or 0) for r in rows if r["orders"] == 0)
+    # R3: a record in a 0-order month has no denominator. It is COUNTED SEPARATELY,
+    # never added to the numerator: that is how a 1-order SKU-month printed 200
+    # complaint records per 100 orders.
+    cov = recs - nosales - zero
+    cond_orders = sum(int(r["orders"] or 0) for r in rows if (r["orders"] or 0) > 0)
+
+    den = list(month_orders(cur, q, months).values())
+    orders = sum(int(d["orders"] or 0) for d in den)
+    return {
+        "recs": recs, "recs_cov": cov, "recs_nosales": nosales, "recs_zero": zero,
+        "pairs": len(rows), "covered": sum(1 for r in rows if r["orders"] is not None),
+        "cond_orders": cond_orders, "cond_recs": cov, "cond_skus": len(rows),
+        "orders": orders,
+        "units": sum(int(d["units"] or 0) for d in den),
+        "refunds_us": sum(int(d["refunds_us"] or 0) for d in den),
+        "orders_us": sum(int(d["orders_us"] or 0) for d in den),
+        "sku_months": sum(int(d["sku_months"] or 0) for d in den),
+        "zero_months": sum(int(d["zero_months"] or 0) for d in den),
+        "months": months,
+        "outside": outside,
+        "code_filtered": bool((q.get("complaint") or "").strip()),
+    }
 
 
-def exposure_line(cur, q, monthly=False):
-    """One line: the exposure for the filtered set and the rate, or why there is none.
+def _months_label(months):
+    """'Jun 2026–Oct 2026', or one month, or ''."""
+    if not months:
+        return ""
+    a, b = months[0], months[-1]
+    la = f"{MN[int(a[5:7]) - 1]} {a[:4]}"
+    lb = f"{MN[int(b[5:7]) - 1]} {b[:4]}"
+    return la if a == b else f"{la}–{lb}"
 
-    Never blank and never a zero when the truth is "unknown": a filter the sales
-    feed does not cover says so in words, because 0.00 complaints per order and
-    "no orders to divide by" are different statements and only one of them is true.
+
+def exposure_line(cur, q, monthly=False, months=None):
+    """The exposure for the product scope, the rate — and every figure it excludes.
+
+    Never blank and never a zero when the truth is "unknown". Three separate
+    statements, because they are three different facts and each used to be
+    silently merged into a rate:
+
+      * the RATE, over every order in the product scope (R2 — the complaint filter
+        does not narrow the denominator);
+      * the CONDITIONAL figure, labelled as such, when a code filter is on (R2);
+      * what was EXCLUDED from the numerator — no sales row, or 0 orders (R3) —
+        and the floor below which no rate is quoted at all (R3).
     """
-    e = exposure(cur, q, monthly=monthly)
-    recs = int(e["recs"] or 0)
+    e = exposure(cur, q, monthly=monthly, months=months)
+    recs = e["recs"]
     if not recs:
         return ""
-    pairs = int(e["pairs"] or 0)
-    covered = int(e["covered_pairs"] or 0)
-    recs_cov = int(e["recs_cov"] or 0)
-    if not covered:
+    orders, units = e["orders"], e["units"]
+    months_txt = _months_label(e["months"])
+    sm = "s" if e["sku_months"] != 1 else ""
+
+    if not e["sku_months"]:
         return ('<p class="mixnote"><b>Sales exposure:</b> no sales data covers this filter '
-                f'({pairs:,} SKU-month{"s" if pairs != 1 else ""} in these records, none of them '
-                'in <code>sales_by_sku_month</code>), so there is no complaints-per-100-orders '
-                'for it. The counts and shares above are unaffected — they need no denominator.'
-                '</p>')
-    if not e["orders"]:
+                f'({e["pairs"]:,} SKU-month{"s" if e["pairs"] != 1 else ""} in these records, '
+                'none of them in <code>sales_by_sku_month</code>), so there is no '
+                'complaints-per-100-orders for it. The counts and shares above are unaffected — '
+                'they need no denominator.</p>')
+    if not orders:
         return ('<p class="mixnote"><b>Sales exposure:</b> '
-                f'{covered:,} SKU-month{"s" if covered != 1 else ""} in these records '
-                f'{"have" if covered != 1 else "has"} a sales row but <b>0 orders</b>, so the '
-                f'rate is undefined — there is nothing to divide these {recs_cov:,} complaint '
-                'records by. It is not 0.00: that would claim no complaints per order, which '
-                'this data cannot support.</p>')
-    orders, units = int(e["orders"]), int(e["units"] or 0)
-    rate = 100.0 * recs_cov / orders
-    bits = [f'<b>Sales exposure:</b> {orders:,} orders and {units:,} units across '
-            f'{covered:,} SKU-month{"s" if covered != 1 else ""} — '
-            f'<b>{rate:.2f}</b> complaint records per 100 orders']
-    if units:
-        bits.append(f'({1000.0 * recs_cov / units:.2f} per 1,000 units)')
-    cov_pct = 100.0 * recs_cov / recs
-    if covered < pairs:
-        bits.append(f'. The sales feed covers {cov_pct:.1f}% of these {recs:,} records; '
-                    f'{pairs - covered:,} SKU-month{"s" if pairs - covered != 1 else ""} '
-                    f'({recs - recs_cov:,} records) have no sales row and are not in the rate')
+                f'{e["sku_months"]:,} SKU-month{sm} in scope {months_txt} '
+                f'{"have" if e["sku_months"] != 1 else "has"} a sales row but <b>0 orders</b>, so '
+                f'the rate is undefined — there is nothing to divide these {recs:,} complaint '
+                'records by. It is not 0.00: that would claim no complaints per order, which this '
+                'data cannot support.</p>')
+
+    bits = []
+    if orders < RATE_FLOOR:
+        # R3: below the floor the arithmetic is real and the inference is not.
+        bits.append(f'<b>Sales exposure:</b> {orders:,} order{"s" if orders != 1 else ""} — '
+                    f'<b>too few to quote a rate</b> (floor {RATE_FLOOR}), across '
+                    f'{e["sku_months"]:,} SKU-month{sm} {months_txt}.')
+    elif not e["recs_cov"]:
+        bits.append(f'<b>Sales exposure:</b> {orders:,} orders across {e["sku_months"]:,} '
+                    f'SKU-month{sm} {months_txt}, but none of these {recs:,} records is in a '
+                    'SKU-month with orders — no rate is computable for them.')
     else:
-        bits.append(f'. Every SKU-month in this selection has a sales row ({cov_pct:.1f}% of '
-                    f'these {recs:,} records)')
-    zero = int(e["zero_months"] or 0)
-    if zero:
-        bits.append(f'; {zero:,} of them sold 0 orders, where the rate is undefined (shown as '
-                    f'“—”, never 0)')
-    bits.append('. Orders/units are the seller\'s own finance feed for the same SKU-month, '
-                'all marketplaces; the complaint side is review records, so this is a record '
-                'rate, not a return rate.')
-    return '<p class="mixnote">' + " ".join(bits).replace(" .", ".") + '</p>'
+        rate = 100.0 * e["recs_cov"] / orders
+        tail = f' ({1000.0 * e["recs_cov"] / units:.2f} per 1,000 units)' if units else ""
+        bits.append(f'<b>Sales exposure:</b> {orders:,} orders and {units:,} units across '
+                    f'{e["sku_months"]:,} SKU-month{sm} {months_txt} — <b>{rate:.2f}</b> '
+                    f'complaint records per 100 orders{tail}.')
+
+        # R2: if the complaint predicate HAD been allowed to shape the denominator,
+        # this is the number it would have produced. It is labelled, never headline.
+        if e["code_filtered"] and e["cond_orders"] and e["cond_orders"] < orders:
+            cr = 100.0 * e["recs_cov"] / e["cond_orders"]
+            bits.append(f'This code\'s {e["recs_cov"]:,} records sit in {e["cond_skus"]:,} of those '
+                        f'SKU-months, which hold {e["cond_orders"]:,} orders: <b>among the '
+                        f'{e["cond_skus"]:,} SKU-months that recorded this code</b> the rate is '
+                        f'{cr:.2f} per 100. That is a conditional figure — the other '
+                        f'{orders - e["cond_orders"]:,} orders could have produced the same '
+                        'complaint and did not.')
+
+    # R3: excluded records, stated as counts, never folded into the numerator.
+    if e["recs_nosales"] or e["recs_zero"]:
+        why = []
+        if e["recs_nosales"]:
+            why.append(f'{e["recs_nosales"]:,} in SKU-months with no sales row')
+        if e["recs_zero"]:
+            why.append(f'{e["recs_zero"]:,} in SKU-months that sold 0 orders')
+        bits.append(f'Excluded from the numerator: {", ".join(why)} — there is no denominator '
+                    'there, and dividing by it would print a rate the data cannot support.')
+    if e["sku_months"] and e["zero_months"]:
+        bits.append(f'{e["zero_months"]:,} of the {e["sku_months"]:,} SKU-month{sm} in scope sold '
+                    '0 orders (shown as “—”, never 0).')
+    if e["outside"]:
+        bits.append(f'{e["outside"]:,} record{"s" if e["outside"] != 1 else ""} fall outside '
+                    f'{months_txt or "this window"} and are not in this rate: the denominator is '
+                    'the orders of the months the panel describes, and dividing a five-month '
+                    'selection by four years of orders would report the corpus coverage, not a '
+                    'complaint rate.')
+
+    # R7: the refund figure, which is the metric that answers the returns question.
+    if e["orders_us"] >= RATE_FLOOR:
+        rr = 100.0 * e["refunds_us"] / e["orders_us"]
+        bits.append(f'<b>US refunds booked in these months:</b> {e["refunds_us"]:,} on '
+                    f'{e["orders_us"]:,} US orders = <b>{rr:.2f}%</b> — refunds booked in the '
+                    'month ÷ orders placed in the month, not a cohort rate; the feed fills '
+                    'refunds for US and CA only, so it is not a worldwide return rate.')
+    elif e["orders_us"]:
+        bits.append(f'US refunds: {e["refunds_us"]:,} on {e["orders_us"]:,} US orders — too few '
+                    'to quote a rate.')
+
+    bits.append('Orders/units are the seller\'s own finance feed for the scope, all '
+                'marketplaces; complaints are review records, so this is a record rate, not '
+                'a return rate.')
+    return '<p class="mixnote">' + " ".join(bits) + '</p>'
+
+
+def source_rate_table(cur, q, months=None):
+    """Complaints per 100 orders BY SOURCE BY MONTH, with each feed's coverage (R4).
+
+    The all-source rate is a composition of feeds. ncx records stop on 2026-07-16
+    and amazon on 2026-08-29, so July's all-source peak is partly those feeds
+    arriving; on fba — the only feed present in every month — September is the peak.
+    A month-over-month comparison is therefore only valid WITHIN one feed, and this
+    table is the evidence for that rule rather than a claim about it.
+    """
+    w, args = _scope_where(q)
+    cur.execute(f"""SELECT IFNULL(source,'(none)') s, MIN(review_date) lo,
+                           MAX(review_date) hi, COUNT(*) n
+                      FROM v_ai_complaints {w} GROUP BY s""", args)
+    feeds = {r["s"]: r for r in cur.fetchall()}
+    cur.execute(f"""SELECT month, IFNULL(source,'(none)') s, SUM(n_complaints) n
+                      FROM v_complaint_rates_by_source {w} GROUP BY month, s""", args)
+    cnt = {}
+    for r in cur.fetchall():
+        cnt.setdefault(r["s"], {})[r["month"]] = int(r["n"] or 0)
+    if months is None:
+        months = sorted({m for d in cnt.values() for m in d})
+    months = [m for m in months if any(m in d for d in cnt.values())]
+    if not months or not cnt:
+        return ""
+    od = month_orders(cur, q, months)
+
+    def cell(s, m):
+        n = cnt.get(s, {}).get(m)
+        o = int((od.get(m) or {}).get("orders") or 0)
+        lo, hi = feeds[s]["lo"], feeds[s]["hi"]
+        a, b = _month_bounds(m)
+        if a is None:
+            return '<td class="num">—</td>'
+        if hi is None or a > hi or b < lo:
+            return '<td class="num" title="this feed has no records in this month">—</td>'
+        # Partial month: say so INSIDE the cell, because a rate over 16 of 31 days
+        # divided by a whole month's orders is not comparable with a full month.
+        partial = ""
+        if lo > a:
+            partial = f'<div class="meta">{lo.day}–{b.day} only</div>'
+        elif hi < b:
+            partial = f'<div class="meta">to the {_ord(hi.day)} only</div>'
+        if n is None:
+            return f'<td class="num">0<div class="meta">0 records{partial}</div></td>'
+        if not o:
+            return f'<td class="num">—<div class="meta">{n} records, no orders</div></td>'
+        return (f'<td class="num">{100.0 * n / o:.2f}'
+                f'<div class="meta">{n:,} rec{partial}</div></td>')
+
+    hdr = "".join(f'<th class="num">{MN[int(m[5:7]) - 1]} {m[:4][2:]}</th>' for m in months)
+    trs = "".join(
+        f'<tr><td><b>{esc(s)}</b><div class="meta">{feeds[s]["lo"]} → {feeds[s]["hi"]}</div></td>'
+        + "".join(cell(s, m) for m in months) + '</tr>'
+        for s in sorted(cnt, key=lambda x: (x == "(none)", -sum(cnt[x].values()))))
+    return f"""<div class="card" style="margin-top:10px">
+<div style="font-size:12.5px;font-weight:650;margin-bottom:2px">Complaints per 100 orders by feed, by month</div>
+<div class="cap" style="margin-bottom:6px">Every order in the scope is the denominator for every feed:
+a complaint from one feed can come from any order. A cell marked “only” covers part of the month, so it
+is not comparable with a full month.</div>
+<table><thead><tr><th>Feed</th>{hdr}</tr></thead><tbody>{trs}</tbody></table>
+<div class="cap"><b>A month-over-month comparison is only valid within one feed.</b> The all-source rate
+is a composition: ncx stops on {feeds.get("ncx", {}).get("hi", "—")} and amazon on
+{feeds.get("amazon", {}).get("hi", "—")}, so a month where either is still running is not comparable
+with one where it is not. fba is the only feed present every month — it is the series to quote.</div>
+</div>"""
 
 
 def mix_block(cur, q, n):
@@ -1455,9 +1749,30 @@ def mix_block(cur, q, n):
            + (' · no earlier records here, so there is nothing to compare'
               if (f and t and not prior_all_n) else ''))
 
-    exp_line = exposure_line(cur, q)
+    # R10: the rate as a second series, and the feed-mix breaks that make a
+    # month incomparable with the one before it. A count can rise while its rate
+    # falls; without this line the panel cannot answer "is it up?" without
+    # re-filtering month by month.
+    cur.execute(f"""SELECT DATE_FORMAT(v.review_date,'%%Y-%%m') m, IFNULL(v.source,'(none)') s
+                      FROM v_ai_complaints v {ws} GROUP BY m, s""", args + [PROCESS_NOISE])
+    src_sets = {}
+    for r in cur.fetchall():
+        if r["m"]:
+            src_sets.setdefault(r["m"], set()).add(r["s"])
+    od = month_orders(cur, q, [m for m, _ in plot])
+    rate_pts, breaks, prev = {}, [], None
+    for i, (m, k) in enumerate(plot):
+        st = tuple(sorted(src_sets.get(m, ())))
+        if prev is not None and st != prev:
+            breaks.append(i)
+        prev = st
+        o = int((od.get(m) or {}).get("orders") or 0)
+        rate_pts[m] = (100.0 * k / o) if o else None
 
-    return f"""<div class="mix" data-n="{n}" data-cur-feed="{cur_feed}" data-prior-feed="{prior_feed}" data-cur-sel="{cur_sel}" data-prior-sel="{prior_sel}" data-lfl="{esc(",".join(lfl))}" data-guard="{1 if reasons else 0}">
+    exp_line = exposure_line(cur, q, months=[m for m, _ in plot])
+    src_tbl = source_rate_table(cur, q, months=[m for m, _ in plot])
+
+    return f"""<div class="mix" data-n="{n}" data-cur-feed="{cur_feed}" data-prior-feed="{prior_feed}" data-cur-sel="{cur_sel}" data-prior-sel="{prior_sel}" data-lfl="{esc(",".join(lfl))}" data-guard="{1 if reasons else 0}" data-rate-breaks="{len(breaks)}">
   <div class="mixhead"><h2>Complaint mix</h2>
     <span class="r">{n:,} complaint records match these filters{when}</span></div>
   {lead}
@@ -1469,9 +1784,10 @@ def mix_block(cur, q, n):
         '<tr><td class="mixnote">No complaint is labelled in this selection.</td></tr>'}</tbody></table>
     </div>
     <div class="mixpanel">
-      <div style="font-size:12.5px;font-weight:650;margin-bottom:2px">Complaint records per month</div>
-      {_mix_svg(plot, part) or '<div class="mixnote">No dated rows in this selection.</div>'}
+      <div style="font-size:12.5px;font-weight:650;margin-bottom:2px">Complaint records per month, and per 100 orders</div>
+      {_mix_svg(plot, part, rate=rate_pts, breaks=breaks) or '<div class="mixnote">No dated rows in this selection.</div>'}
       <div class="cap">{len(plot)} month{'s' if len(plot) != 1 else ''} with data{' · ' + plot[0][0] + ' to ' + plot[-1][0] if plot else ''}{f' · data to {hi.isoformat()}' if hi else ''}{f' · {omitted:,} older records outside this range are not drawn' if omitted else ''}{partnote}{cov}</div>
+      <div class="cap">— <span style="color:#2b5cff">records</span> · – – <span style="color:#b45309">per 100 orders, all sources</span>{' · shaded month = the set of feeds contributing records changed' if breaks else ''}. The rate divides this selection's records by the scope's orders for the whole month, so a shaded month is not comparable with the one before it — <b>for a quotable trend use the fba row of the per-feed table below</b>, the only feed present every month.</div>
     </div>
   </div>
   <p class="mixnote"><b>{n:,}</b> records match · <b>{bars_total:,}</b> are complaints · {blank:,} carry no
@@ -1479,9 +1795,12 @@ def mix_block(cur, q, n):
   distribution.{riser}{caveat}</p>
   <p class="mixnote">{disc}.{val}.{dupnote}</p>
   {exp_line}
+  {src_tbl}
   <p class="mixnote">A rise in this panel is a rise in <b>complaint records</b>: a launch, a promotion
-  and a quality problem all move it, and only the exposure line above can say whether it moved
-  faster than the orders did.</p>
+  and a quality problem all move it. Whether it moved faster than the orders did is the dashed rate line
+  above and the <a href="/monthly?{esc(qstr(q))}">Monthly</a> page
+  (<code>/monthly</code> and <code>/monthly_sku.csv</code>), where the same records sit beside their
+  denominator — not the record counts.</p>
 </div>"""
 
 
@@ -1826,7 +2145,21 @@ MONTHLY_COLS = ["month", "quarter", "product_family", "product", "parent", "sku"
                 "pct_of_sku_month", "n_human_validated", "n_repeat",
                 # Exposure, appended rather than inserted: every existing column keeps
                 # its position, so a saved CSV and a fresh one still line up by index.
-                "orders", "units", "complaints_per_100_orders", "complaints_per_1000_units"]
+                "orders", "units", "complaints_per_100_orders", "complaints_per_1000_units",
+                # R7: the refund figures, because "did returns rise" is her question and
+                # a complaint count cannot answer it.
+                "refunds_us", "orders_us", "refund_rate_us_pct",
+                # R1/R12: the grain and the flags that make this file safe to pivot.
+                # orders/units/refunds are carried on ONE row per SKU-month (see
+                # monthly_csv); exposure_row says which, so a SUM cannot multiply them.
+                "grain", "exposure_row", "rate_quotable", "refund_rate_quotable"]
+
+# The sku-month export (R1): one row per SKU-month, nothing repeated, safe to SUM.
+MONTHLY_SKU_COLS = ["month", "quarter", "product_family", "product", "parent", "sku", "asin",
+                    "title_short", "n_complaints", "n_codes", "orders", "units",
+                    "refunds_us", "orders_us", "refund_rate_us_pct",
+                    "complaints_per_100_orders", "complaints_per_1000_units",
+                    "rate_quotable", "refund_rate_quotable", "has_sales", "grain"]
 
 
 def month_grain(v):
@@ -1927,21 +2260,30 @@ def p_monthly(cur, q, msg="", ctx=None):
                            n_human_validated, n_repeat,
                            orders, units, refunds, has_sales,
                            complaints_per_100_orders, complaints_per_1000_units,
+                           refunds_us, orders_us, refund_rate_us_pct,
+                           rate_quotable, refund_rate_quotable,
                            LEFT(COALESCE(title,''),70) title, title_short
                       FROM v_complaint_rates {w}
                      ORDER BY month DESC, n_complaints DESC, sku, complaint
                      LIMIT {PAGE_ROLLUP} OFFSET {off}""", args)
     rows = cur.fetchall()
 
-    def _rate(v, has, why):
+    def _rate(v, quotable, denom, why):
         """An undefined rate is "—" with the reason in the tooltip — never 0.00.
 
         NULL from the view means either "no sales row for this SKU-month" or "that
         SKU-month sold 0 orders". Both make the ratio undefined, and 0.00 would
         read as "no complaints per order", which is a different and false claim.
+
+        Below RATE_FLOOR orders the arithmetic exists but is not a rate (R3): the
+        cell keeps the em dash and prints the denominator, so a 1-order SKU-month
+        can never read "200.00 per 100 orders".
         """
         if v is None:
             return f'<td class="mono num" title="{esc(why)}">—</td>'
+        if quotable is not None and not quotable:
+            return (f'<td class="mono num" title="{esc(why)}">—'
+                    f'<div class="meta">{int(denom or 0):,} orders — too few to quote a rate</div></td>')
         return f'<td class="mono num">{float(v):,.2f}</td>'
 
     def _num(v, why="no sales row for this SKU-month"):
@@ -1959,12 +2301,15 @@ def p_monthly(cur, q, msg="", ctx=None):
         <td class="mono num">{int(r["n_human_validated"] or 0):,}</td>
         <td class="mono num">{int(r["n_repeat"] or 0):,}</td>
         {_num(r["orders"])}{_num(r["units"])}
-        {_rate(r["complaints_per_100_orders"], r["has_sales"],
+        {_rate(r["complaints_per_100_orders"], r["rate_quotable"], r["orders"],
                "no sales row for this SKU-month" if not r["has_sales"]
-               else "0 orders in this SKU-month: the rate is undefined, not zero")}
-        {_rate(r["complaints_per_1000_units"], r["has_sales"],
+               else f'{int(r["orders"] or 0):,} orders — too few to quote a rate (floor {RATE_FLOOR})')}
+        {_rate(r["complaints_per_1000_units"], None, r["units"],
                "no sales row for this SKU-month" if not r["has_sales"]
                else "0 units in this SKU-month: the rate is undefined, not zero")}
+        {_rate(r["refund_rate_us_pct"], r["refund_rate_quotable"], r["orders_us"],
+               "no US orders in this SKU-month" if not r["orders_us"]
+               else f'{int(r["orders_us"] or 0):,} US orders — too few to quote a rate (floor {RATE_FLOOR})')}
         </tr>""" for r in rows)
 
     months = options(cur, """SELECT month k, SUM(n) n FROM v_ai_complaints_monthly
@@ -1974,20 +2319,35 @@ def p_monthly(cur, q, msg="", ctx=None):
     complaints = options(cur, "SELECT complaint k, SUM(n) n FROM v_ai_complaints_monthly GROUP BY complaint ORDER BY n DESC")
     complaint_sql = select('complaint', [(k, display_label(k), v) for k, v in complaints], q.get("complaint") or "")
     mf, mt = month_grain(q.get("from")), month_grain(q.get("to"))
-    exp_line = exposure_line(cur, q, monthly=True)
+    # The months THIS page describes. With an explicit range it is that range; with
+    # none it is the contiguous run that holds the corpus (the same rule the chart
+    # uses) — 18 straggling rows back to 2023 would otherwise divide a five-month
+    # selection by four years of orders and print the corpus's coverage as a rate.
+    cur.execute(f"""SELECT month k, SUM(n_complaints) n FROM v_complaint_rates {w}
+                     GROUP BY month ORDER BY month""", args)
+    mm = [(r["k"], int(r["n"])) for r in cur.fetchall() if r["k"]]
+    mwin = [m for m, _ in _trim_months(mm)[0]] if mm else None
+    exp_line = exposure_line(cur, q, monthly=True, months=mwin)
+    src_tbl = source_rate_table(cur, q)
     grain_note = ""
     if mf or mt:
         grain_note = (f' <b>Months {mf or "first"} to {mt or "last"}</b> — this page is month grain, so a date '
                       f'like the 14th means that whole month (the Complaint records link above carries month=).')
     body = f"""<h1>Monthly</h1>
 <p class="sub">The grain the team reports on: SKU × month × complaint, with the share of that SKU-month and how
-many rows a human validated. <b>Orders, units and the two rate columns come from the seller's own finance
+many rows a human validated. <b>Orders, units and the rate columns come from the seller's own finance
 feed for the same SKU-month</b> (all marketplaces); a row with no sales row, or with zero orders, shows
-“—” because the rate is undefined there — never 0. {n:,} rows match{'' if n == 1 else ''} · page {pg} of {pages}
-(rows {off + 1:,}–{off + len(rows):,}) · <a href="/monthly.csv?{esc(qstr(q))}">export CSV</a>.
+“—” because the rate is undefined there — never 0. A rate is quoted only from {RATE_FLOOR:,} orders
+upwards: below that the cell keeps the dash and prints how many orders it has, because 54 refunds on 2
+orders is 2700% and means nothing. {n:,} rows match{'' if n == 1 else ''} · page {pg} of {pages}
+(rows {off + 1:,}–{off + len(rows):,}) · <a href="/monthly.csv?{esc(qstr(q))}">export CSV</a>
+· <a href="/monthly_sku.csv?{esc(qstr(q))}"><b>export at SKU-month grain</b></a>
+(<b>use this one for pivots</b> — <code>/monthly.csv</code> carries a SKU-month's orders/units/refunds
+on ONE row and blanks them on that SKU-month's other complaint rows, so SUM(orders) is correct but a
+SUM by complaint code is not).
 Process noise (Review Deletion) and unclassified categories are not in this rollup; the record-grain rows
 behind any filter are on <a href="{esc(reviews_url_for_month(q))}">Complaint records</a>,
-where the same filters also show the complaint mix.{grain_note}<br>
+where the same filters also show the complaint mix and the per-feed rate series.{grain_note}<br>
 <b>{n_rep:,}</b> rows in this rollup repeat a comment already recorded on the same order — the
 <code>n_repeat</code> column carries them, they are counted in <code>n</code>, and nothing is removed;
 the “distinct complaints” view on Complaint records is the only place they are dropped, on request.
@@ -2009,12 +2369,14 @@ and <code>dup_rank</code>.)</p>
   <div><a href="/monthly">clear</a></div>
 </form>
 {exp_line}
+{src_tbl}
 <div class="card"><table><thead><tr><th>Month</th><th>Product</th><th>Family</th><th>Parent</th><th>SKU</th>
 <th>Complaint</th><th>Category</th><th class="num">Records</th><th class="num">% of SKU-month</th>
 <th class="num">Human validated</th><th class="num">Repeats</th>
 <th class="num">Orders</th><th class="num">Units</th>
-<th class="num">per 100 orders</th><th class="num">per 1,000 units</th></tr></thead>
-<tbody>{trs or '<tr><td colspan="15" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
+<th class="num">per 100 orders</th><th class="num">per 1,000 units</th>
+<th class="num">US return rate</th></tr></thead>
+<tbody>{trs or '<tr><td colspan="16" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
 <div class="pager">{f'<a href="/monthly?{esc(qstr(q, page=pg-1))}">← previous</a>' if pg > 1 else ''}
   <span class="sp">page {pg} of {pages}</span>
   {f'<a href="/monthly?{esc(qstr(q, page=pg+1))}">next →</a>' if pg < pages else ''}</div>"""
@@ -2022,16 +2384,32 @@ and <code>dup_rank</code>.)</p>
 
 
 def monthly_csv(cur, q):
+    """The complaint-code grain, with ONE exposure row per SKU-month (R1).
+
+    The defect this fixes: orders/units used to be repeated on every complaint-code
+    row of a SKU-month, so a pivot that summed them multiplied the denominator by
+    the number of codes — seat cushions, 2026-07 summed to 552,965 orders against a
+    true 32,848 (16.83x).
+
+    Now the denominator is written on the FIRST row of each (sku, month) and left
+    EMPTY on the rest, and `exposure_row` says which row carries it. SUM(orders)
+    over the whole file is then the true total, and `grain` names the grain on
+    every row so nobody has to infer it. For a pivot by SKU or month use
+    /monthly_sku.csv, which is one row per SKU-month with nothing repeated.
+    """
     w, args = build_where_monthly(q)
     cur.execute(f"""SELECT month, quarter, product_family, product, parent, sku, asin, title,
                            title_short, complaint, category, n_complaints, pct_of_sku_month,
                            n_human_validated, n_repeat,
-                           orders, units, complaints_per_100_orders, complaints_per_1000_units
+                           orders, units, refunds_us, orders_us,
+                           complaints_per_100_orders, complaints_per_1000_units,
+                           refund_rate_us_pct, rate_quotable, refund_rate_quotable
                       FROM v_complaint_rates {w}
                      ORDER BY month DESC, n_complaints DESC, sku, complaint""", args)
     buf = io.StringIO()
     wtr = csv.writer(buf)
     wtr.writerow(MONTHLY_COLS)
+    seen = set()
     for r in cur.fetchall():
         row = dict(r)
         # `n` keeps its old name in the export so a saved CSV and this one still
@@ -2042,11 +2420,99 @@ def monthly_csv(cur, q):
         # the two exports join. The readable label is a separate column, added
         # here and in export_csv, never a rename of one and not the other.
         row["complaint_display"] = display_label(row.get("complaint")) or ""
-        # An undefined rate is written as an EMPTY CSV cell, not 0: a pivot that
-        # averages a fake 0 would report a rate nobody measured.
+        row["grain"] = "sku_month_complaint"
+        key = (row.get("sku"), row.get("month"))
+        first = key not in seen
+        seen.add(key)
+        row["exposure_row"] = 1 if first else 0
+        if not first:
+            # Blank, not 0: an empty cell is "not carried here", and a pivot that
+            # averages a fake 0 would report a denominator nobody measured.
+            for c in ("orders", "units", "refunds_us", "orders_us",
+                      "complaints_per_100_orders", "complaints_per_1000_units",
+                      "refund_rate_us_pct"):
+                row[c] = ""
+        # An undefined rate is written as an EMPTY CSV cell, not 0.
         wtr.writerow([row.get(c) for c in MONTHLY_COLS])
     return (buf.getvalue().encode("utf-8-sig"), "text/csv",
             f"attachment; filename=complaint-records-monthly-{date.today().isoformat()}.csv")
+
+
+def monthly_sku_csv(cur, q):
+    """One row per SKU-month — the pivot file (R1, R7, R12).
+
+    Rows are the SKU-months of the PRODUCT SCOPE (the product filters, with the
+    complaint filter removed) in the months the filter touches, taken from the
+    sales table and LEFT JOINed to the filtered complaint counts. So:
+
+      * every SKU-month appears ONCE, and orders/units/refunds appear once with it;
+      * a SKU-month that recorded nothing under the current filter appears with
+        n_complaints = 0 and its orders — which is what makes the sum of the file
+        equal to the exposure line's denominator (a family's August denominator is
+        39,390, not the 38,513 of the SKU-months that happened to complain);
+      * a SKU-month with complaints but no sales row still appears, with empty
+        orders and an empty rate.
+
+    Sum n_complaints, orders, units, refunds_us and orders_us down any slice; do
+    NOT sum complaints_per_100_orders — recompute it from the totals, because an
+    average of rates is not a rate.
+    """
+    w, args = build_where_monthly(q)
+    cur.execute(f"""SELECT sku, month, SUM(n_complaints) n_complaints, COUNT(*) n_codes,
+                           MAX(quarter) quarter
+                      FROM v_complaint_rates {w} GROUP BY sku, month""", args)
+    comp = {(r["sku"], r["month"]): r for r in cur.fetchall()}
+    months = sorted({m for (_, m) in comp if m})
+    if not months:
+        # No matching complaint anywhere: still export the scope's sales, so the
+        # file is a true exposure file rather than an empty one.
+        mf, mt = month_grain(q.get("from")), month_grain(q.get("to"))
+        months = [mf or "2026-06", mt or mf or "2026-10"]
+    skus = scope_skus(cur, q)
+    dims = {}
+    if skus:
+        ph = ",".join(["%s"] * len(skus))
+        cur.execute(f"""SELECT sku, MAX(product_family) product_family, MAX(parent) parent,
+                               MAX(product) product, MAX(title_short) title_short, MAX(asin) asin
+                          FROM v_ai_complaints_monthly WHERE sku IN ({ph}) GROUP BY sku""", skus)
+        dims = {r["sku"]: r for r in cur.fetchall()}
+        cur.execute(f"""SELECT sku, month, orders, units, refunds_us, orders_us
+                          FROM sales_by_sku_month
+                         WHERE sku IN ({ph}) AND month BETWEEN %s AND %s""",
+                    skus + [months[0], months[-1]])
+        sales = {(r["sku"], r["month"]): r for r in cur.fetchall()}
+    else:
+        sales = {}
+
+    buf = io.StringIO()
+    wtr = csv.writer(buf)
+    wtr.writerow(MONTHLY_SKU_COLS)
+    keys = sorted({(s, m) for (s, m) in sales} | {(s, m) for (s, m) in comp},
+                  key=lambda k: (k[1], k[0] or ""), reverse=True)
+    for sku, month in keys:
+        s, c, d = sales.get((sku, month)), comp.get((sku, month)), dims.get(sku, {})
+        n = int(c["n_complaints"]) if c else 0
+        o = int(s["orders"]) if s and s["orders"] is not None else None
+        u = int(s["units"]) if s and s["units"] is not None else None
+        rfu = int(s["refunds_us"]) if s and s["refunds_us"] is not None else None
+        ou = int(s["orders_us"]) if s and s["orders_us"] is not None else None
+        wtr.writerow([
+            month, (c or {}).get("quarter") or "", d.get("product_family") or "",
+            d.get("product") or "", d.get("parent") or "", sku, d.get("asin") or "",
+            d.get("title_short") or "", n, int(c["n_codes"]) if c else 0,
+            "" if o is None else o, "" if u is None else u,
+            "" if rfu is None else rfu, "" if ou is None else ou,
+            # R12: below the floor the ratio is EMPTY, not 2700%.
+            (round(100.0 * rfu / ou, 2) if ou and ou >= RATE_FLOOR else ""),
+            (round(100.0 * n / o, 2) if o else ""),
+            (round(1000.0 * n / u, 2) if u else ""),
+            1 if (o and o >= RATE_FLOOR) else 0,
+            1 if (ou and ou >= RATE_FLOOR) else 0,
+            1 if s else 0,
+            "sku_month",
+        ])
+    return (buf.getvalue().encode("utf-8-sig"), "text/csv",
+            f"attachment; filename=complaint-records-by-sku-month-{date.today().isoformat()}.csv")
 
 
 # ---------------------------------------------------------------- codes
@@ -2600,6 +3066,11 @@ def app(environ, start_response):
 
         if path == "/monthly.csv":
             body, ctype, disp = monthly_csv(cur, q)
+            start_response("200 OK", [("Content-Type", ctype), ("Content-Disposition", disp)])
+            return [body]
+
+        if path == "/monthly_sku.csv":
+            body, ctype, disp = monthly_sku_csv(cur, q)
             start_response("200 OK", [("Content-Type", ctype), ("Content-Disposition", disp)])
             return [body]
 

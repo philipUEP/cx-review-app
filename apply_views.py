@@ -158,6 +158,13 @@ DUP_TABLE = "review_duplicates"
 # statement from "the build has not run".
 SALES_TABLE = "sales_by_sku_month"
 
+# The volume floor for quoting a rate (R3/R12). Below 100 orders a ratio is
+# arithmetic on a handful of transactions, not a level: SC-XL-B sold 2 US orders
+# in 2026-07 and booked 54 refunds (2700%), and a 1-order SKU-month printed 200
+# complaints per 100 orders. The views carry the flag; the app prints the
+# denominator instead of the ratio; POWERBI.md filters on it.
+RATE_FLOOR = 100
+
 DUP_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS {t} (
   grp         VARCHAR(200) NOT NULL,
@@ -333,17 +340,116 @@ SELECT m.sku,
        s.refunds,
        ROUND(m.n * 100.0  / NULLIF(s.orders, 0), 2) AS complaints_per_100_orders,
        ROUND(m.n * 1000.0 / NULLIF(s.units, 0), 2)  AS complaints_per_1000_units,
+       -- QUOTABILITY (R12). A ratio whose denominator is a handful of orders is
+       -- arithmetic, not information: SC-XL-B sold 2 US orders in 2026-07 and
+       -- booked 54 refunds, so an unguarded ratio printed 2700% beside rows that
+       -- are ordinary levels. A rate is quoted only at >= 100 orders; below that
+       -- the flags say so and the app prints the denominator instead.
+       CASE WHEN s.orders >= {RATE_FLOOR} THEN 1 ELSE 0 END AS rate_quotable,
+       CASE WHEN s.orders_us >= {RATE_FLOOR} THEN 1 ELSE 0 END AS refund_rate_quotable,
        ROUND(s.refunds * 100.0 / NULLIF(s.orders, 0), 2) AS refund_rate_pct,
        -- The feed only populates refunds for US and CA (US 8.4%, CA 9.5%,
        -- every EU marketplace ~0.2% in 2026), so refund_rate_pct divides a
        -- mostly-US numerator by a WORLDWIDE denominator: it is a series, not a
        -- level. This is the same-market figure and the one to quote as a rate.
-       ROUND(s.refunds_us * 100.0 / NULLIF(s.orders_us, 0), 2) AS refund_rate_us_pct,
+       -- NULL below the floor: 54/2 is not a 2700% return rate, and a pivot that
+       -- averages it would report a number nobody measured.
+       CASE WHEN s.orders_us >= {RATE_FLOOR}
+            THEN ROUND(s.refunds_us * 100.0 / NULLIF(s.orders_us, 0), 2)
+            ELSE NULL END                         AS refund_rate_us_pct,
        s.orders_us,
        s.units_us,
        s.refunds_us,
        CASE WHEN s.sku IS NULL THEN 0 ELSE 1 END    AS has_sales
   FROM v_ai_complaints_monthly m
+  LEFT JOIN {SALES_TABLE} s
+         ON s.sku = m.sku AND s.month = m.month
+"""),
+    # THE PER-SOURCE RATE (R4). The all-source rate is a composition of feeds:
+    # ncx stops on 2026-07-16 and amazon on 2026-08-29, so a month-over-month
+    # change in the all-source figure partly measures which feeds were running.
+    # fba is the only feed present every month, and it is the only series a
+    # month-over-month comparison may use. Same grain as v_complaint_rates plus
+    # `source`; the denominator is still the SKU-month's whole order count, because
+    # every order could have produced a complaint from any feed.
+    ("v_complaint_rates_by_source", f"""
+CREATE OR REPLACE VIEW v_complaint_rates_by_source AS
+SELECT m.sku,
+       m.parent,
+       m.product,
+       m.product_family,
+       m.month,
+       m.source,
+       m.complaint,
+       m.category,
+       m.n                                  AS n_complaints,
+       s.orders,
+       s.units,
+       s.refunds_us,
+       s.orders_us,
+       ROUND(m.n * 100.0 / NULLIF(s.orders, 0), 2) AS complaints_per_100_orders,
+       CASE WHEN s.orders >= {RATE_FLOOR} THEN 1 ELSE 0 END AS rate_quotable,
+       CASE WHEN s.sku IS NULL THEN 0 ELSE 1 END    AS has_sales
+  FROM (SELECT v.sku,
+               MAX(v.parent)                       AS parent,
+               MAX(v.product)                      AS product,
+               MAX({family_sql('v.parent')})        AS product_family,
+               DATE_FORMAT(v.review_date, '%Y-%m') AS month,
+               v.source,
+               v.final_complaint                   AS complaint,
+               MAX(v.final_category)               AS category,
+               COUNT(*)                            AS n
+          FROM v_ai_complaints v
+         WHERE v.final_complaint IS NOT NULL
+           AND v.review_date IS NOT NULL
+           AND v.final_complaint <> '{PROCESS_NOISE}'
+           AND (v.final_category IS NULL OR v.final_category NOT IN ({','.join(repr(c) for c in BAD_CATEGORIES)}))
+         GROUP BY v.sku, DATE_FORMAT(v.review_date, '%Y-%m'), v.source, v.final_complaint) m
+  LEFT JOIN {SALES_TABLE} s
+         ON s.sku = m.sku AND s.month = m.month
+"""),
+    # THE PIVOT GRAIN (R1). One row per SKU-month with the all-code numerator and
+    # the denominator on the same row. v_complaint_rates repeats orders/units on
+    # every complaint-code row, so SUM(orders) over a pivot multiplies the
+    # denominator by the number of codes (28x on one SKU-month; seat cushions
+    # 2026-07 summed to 552,965 orders against a true 32,848). This view is the
+    # safe thing to pivot and the backing table for /monthly_sku.csv.
+    ("v_sku_month_rates", f"""
+CREATE OR REPLACE VIEW v_sku_month_rates AS
+SELECT m.sku,
+       m.asin,
+       m.parent,
+       m.product,
+       m.title,
+       m.title_short,
+       m.product_family,
+       m.month,
+       m.quarter,
+       m.n_complaints,
+       m.n_codes,
+       m.n_human_validated,
+       m.n_repeat,
+       s.orders,
+       s.units,
+       s.refunds,
+       s.refunds_us,
+       s.orders_us,
+       s.units_us,
+       ROUND(m.n_complaints * 100.0  / NULLIF(s.orders, 0), 2) AS complaints_per_100_orders,
+       ROUND(m.n_complaints * 1000.0 / NULLIF(s.units, 0), 2)  AS complaints_per_1000_units,
+       CASE WHEN s.orders >= {RATE_FLOOR} THEN 1 ELSE 0 END    AS rate_quotable,
+       CASE WHEN s.orders_us >= {RATE_FLOOR} THEN 1 ELSE 0 END AS refund_rate_quotable,
+       CASE WHEN s.orders_us >= {RATE_FLOOR}
+            THEN ROUND(s.refunds_us * 100.0 / NULLIF(s.orders_us, 0), 2)
+            ELSE NULL END                                     AS refund_rate_us_pct,
+       CASE WHEN s.sku IS NULL THEN 0 ELSE 1 END              AS has_sales
+  FROM (SELECT sku, MAX(asin) asin, MAX(parent) parent, MAX(product) product,
+               MAX(title) title, MAX(title_short) title_short,
+               MAX(product_family) product_family, month, MAX(quarter) quarter,
+               SUM(n_complaints) n_complaints, COUNT(*) n_codes,
+               SUM(n_human_validated) n_human_validated, SUM(n_repeat) n_repeat
+          FROM v_complaint_rates
+         GROUP BY sku, month) m
   LEFT JOIN {SALES_TABLE} s
          ON s.sku = m.sku AND s.month = m.month
 """),
@@ -569,6 +675,44 @@ def check_rate_nulls(cur):
     if any(bad):
         raise SystemExit(f"rate view has ratios against no denominator: positives {bad[0]}, "
                          f"zeros {bad[1]}, units positives {bad[2]}, units zeros {bad[3]}")
+
+    # R12: a refund ratio above the volume floor only, and never a value where the
+    # flag says the denominator is too thin. 2700% beside ordinary rows is not a
+    # level, it is two orders and 54 refunds.
+    cur.execute("""SELECT SUM(refund_rate_us_pct IS NOT NULL AND refund_rate_quotable = 0) a,
+                          SUM(refund_rate_us_pct < 0 OR refund_rate_us_pct > 100) b
+                     FROM v_complaint_rates WHERE refund_rate_us_pct IS NOT NULL""")
+    q = cur.fetchone()
+    if int(q[0] or 0) or int(q[1] or 0):
+        raise SystemExit(f"refund_rate_us_pct escapes the quotable floor: "
+                         f"{int(q[0] or 0)} below-floor values, {int(q[1] or 0)} outside 0..100")
+
+    # The per-source view must carry exactly the same records and the same grain as
+    # the daily rollup with `source` added — otherwise a per-source rate and the
+    # all-source rate do not add up, and the fba-only series is not the same measure.
+    cur.execute("""SELECT COUNT(*) c, COALESCE(SUM(n_complaints),0) s,
+                          COUNT(DISTINCT CONCAT_WS('~', IFNULL(sku,''), IFNULL(month,''),
+                                                   IFNULL(source,''), IFNULL(complaint,''))) g
+                     FROM v_complaint_rates_by_source""")
+    src = cur.fetchone()
+    if int(src[1]) != int(b[1]):
+        raise SystemExit(f"per-source view holds {int(src[1]):,} records, the monthly grain "
+                         f"{int(b[1]):,} — a source is being dropped or double-counted")
+    if int(src[2]) != int(src[0]):
+        raise SystemExit(f"per-source view grain is split: {int(src[0]):,} rows for "
+                         f"{int(src[2]):,} (sku, month, source, complaint) groups")
+
+    # The sku-month view is the pivot grain: one row per SKU-month, counts unchanged.
+    cur.execute("""SELECT COUNT(*) c, COALESCE(SUM(n_complaints),0) s,
+                          COUNT(DISTINCT CONCAT_WS('~', IFNULL(sku,''), IFNULL(month,''))) g
+                     FROM v_sku_month_rates""")
+    sm = cur.fetchone()
+    if int(sm[1]) != int(b[1]):
+        raise SystemExit(f"sku-month view holds {int(sm[1]):,} records, the complaint grain "
+                         f"{int(b[1]):,}")
+    if int(sm[2]) != int(sm[0]):
+        raise SystemExit(f"sku-month view is not one row per SKU-month: {int(sm[0]):,} rows, "
+                         f"{int(sm[2]):,} groups")
     return {k: int(r[i] or 0) for i, k in zip(
         (4, 5, 6, 7), ("no_sales_rows", "zero_order_rows", "covered_rows", "all_rows"))}
 

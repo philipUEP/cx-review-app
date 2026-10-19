@@ -103,7 +103,38 @@ feed is on the same server, and it is now the denominator.
 | object | grain | columns |
 |---|---|---|
 | `sales_by_sku_month` (table) | seller SKU × month | `sku, month (YYYY-MM), units, orders, refunds, sales, units_us, orders_us, refunds_us, sales_us, n_countries` |
-| `v_complaint_rates` (view) | SKU × month × complaint — **the same rows and the same counts as `v_ai_complaints_monthly`** | that view's columns (`n` renamed `n_complaints`) plus `orders, units, refunds, complaints_per_100_orders, complaints_per_1000_units, refund_rate_pct, refund_rate_us_pct, orders_us, units_us, refunds_us, has_sales` |
+| `v_complaint_rates` (view) | SKU × month × complaint — **the same rows and the same counts as `v_ai_complaints_monthly`** | that view's columns (`n` renamed `n_complaints`) plus `orders, units, refunds, complaints_per_100_orders, complaints_per_1000_units, rate_quotable, refund_rate_pct, refund_rate_us_pct, refund_rate_quotable, orders_us, units_us, refunds_us, has_sales` |
+| `v_sku_month_rates` (view) | **SKU × month — one row, nothing repeated** | dims plus `n_complaints, n_codes, orders, units, refunds, refunds_us, orders_us, complaints_per_100_orders, complaints_per_1000_units, refund_rate_us_pct, rate_quotable, refund_rate_quotable, has_sales` |
+| `v_complaint_rates_by_source` (view) | SKU × month × source × complaint | `sku, parent, product, product_family, month, source, complaint, category, n_complaints, orders, complaints_per_100_orders, rate_quotable, has_sales` |
+
+### Which denominator: the complaint filter must not shape it
+
+**A rate divides records by the orders that could have produced them, not by the
+orders that did.** `v_complaint_rates` carries a SKU-month's whole order count on
+every complaint-code row, and the app's exposure line divides by the **product
+scope's** orders — every SKU the corpus attributes to the scope, in every month the
+window covers, including SKU-months that recorded nothing.
+
+Measured, 2026-10-19, seat cushions:
+
+| month | records | family orders | rate | orders in SKU-months with **any** complaint | that rate |
+|---|---|---|---|---|---|
+| 2026-06 | 64 | 43,732 | 0.15 | 42,734 | 0.15 |
+| 2026-07 | 510 | 32,848 | **1.55** | 32,848 | 1.55 |
+| 2026-08 | 208 | 39,390 | **0.53** | 38,513 | 0.54 |
+| 2026-09 | 468 | 39,470 | 1.19 | 39,451 | 1.19 |
+| 2026-10 (to 19th) | 299 | 29,220 | 1.02 | 28,527 | 1.05 |
+
+The gap is small for the whole family but large for a single code: **Too Firm, seat
+cushions, July** is 27 records over a family denominator of 32,848 = **0.08** per 100
+orders, while dividing by the 26,107 orders in the 7 SKU-months that recorded the
+code gives 0.10 (+25.8%). Vague Complaint inflates by +19.5%. The app prints the
+family rate and, when a code filter is on, the conditional figure labelled *"among
+the N SKU-months that recorded this code"*. Never quote the second as the first.
+
+In PowerBI the same rule applies: put the **product** filters on the denominator and
+leave the complaint code out of it.
+
 
 ### The join, proved rather than assumed
 
@@ -137,6 +168,25 @@ This is the *only* correct way to sum it: the same SKU appears on several
 `products` rows (one per marketplace), each with its own finance rows, so a SKU
 total is the sum across them. A SKU-month repeated per country is not a duplicate.
 
+### Which grain to pivot (this is where the denominator gets destroyed)
+
+`v_complaint_rates` is a **complaint-code** grain: orders/units/refunds are repeated
+on every code row of a SKU-month. A pivot that sums `orders` off it multiplies the
+denominator by the number of codes — seat cushions, 2026-07 sums to **552,965
+orders against a true 32,848 (16.83x)**, and one SKU-month repeats its orders 28
+times.
+
+Use **`v_sku_month_rates`** for anything a person will pivot or chart, or the
+`/monthly_sku.csv` export, which is one row per SKU-month and includes SKU-months
+that recorded nothing (0 complaints, their orders intact) so a family or catalogue
+total reconciles with the exposure line. `v_complaint_rates` is for a
+code-by-code view and for the SUMX measures below.
+
+`/monthly.csv` is the code grain and now carries the denominator **once** per
+SKU-month (`exposure_row = 1`, blank on that SKU-month's other rows), with a
+`grain` column on every row — so `SUM(orders)` over the file is right, but a SUM
+grouped by complaint code still is not. That is what `/monthly_sku.csv` is for.
+
 ### What NULL means — and why it is never 0
 
 Every ratio in the view is `n * 100 / NULLIF(denominator, 0)`. NULL therefore means
@@ -153,6 +203,16 @@ by". The app prints `—` with that reason in the tooltip and writes an empty CS
 cell; PowerBI must do the same (see the measure rules below).
 
 `has_sales` (1/0) separates case 1 from case 2 without a second join.
+
+**The volume floor (R12).** A ratio is only quoted from **100 orders** upwards.
+`rate_quotable` says whether `orders >= 100`; `refund_rate_quotable` says whether
+`orders_us >= 100`. `refund_rate_us_pct` is **NULL below that floor**, because the
+value it used to print was not a rate: `SC-XL-B` 2026-07 booked 54 US refunds on 2
+US orders (2700%) and `SCBC` 2026-09 booked 15 on 3 (500%), both sitting in a table
+that otherwise reads 9–14%. The refund counts and order counts are still there, so
+the number can be computed by anyone who wants it — it just is not published as a
+level. Filter every refund measure on `refund_rate_quotable = 1`, and every
+complaint-rate measure on `rate_quotable = 1`.
 
 ### `refunds` is the seller's own refund count — a sanity check, not a validation
 
@@ -171,10 +231,74 @@ the two are the same measure — quoted only as a consistency check.
 by a **worldwide** denominator — it is comparable across months only while the
 market mix is stable, and it is not a level you can quote as "our return rate".
 `refund_rate_us_pct` (`refunds_us / orders_us`) is the same-market figure and the
-one to quote. Two more limits: refunds lag orders, so a low-volume SKU-month can
-show a rate above 100% (`SC-XL-B`, July 2026: 54 refunds on 2 orders) — read those
-at family level, never per SKU-month; and `orders`/`units` are Amazon orders while
-the complaints are review records, so neither ratio is a review rate.
+one to quote. Note precisely what it is: **refunds booked in a month ÷ orders
+placed in that month** — a period ratio, **not** a cohort rate. The refunds booked
+in July are mostly refunds of orders placed in May and June, so the denominator is
+not the population the numerator came from; when orders fall sharply, the ratio
+rises mechanically.
+
+### The July 2026 refund spike, and what it is not
+
+Seat cushions, `refunds_us / orders_us`: **14.54% in July 2026** (3,962 / 27,254)
+against 9.11% in June and 10.87% in August.
+
+- **It is the second-highest month on record, not the highest.** The finance feed
+  spans **2020-09 → 2026-10** (74 months). **January 2023 was 16.09%** (2,207 /
+  13,716). July 2026 is second. Never quote an arbitrary window ("the 17 months the
+  feed covers") without naming it — the feed's real range is in the table above and
+  it holds 2023-01.
+- **July was not a demand shift, it followed a June promotion.** June ASP fell
+  **$46.85 → $41.90 (-10.6%)** and orders rose **+30.2% to 43,732** (the highest of
+  the 2024–26 window); July orders then fell **-24.9% to 32,848** while refunds
+  rose. A big low-price June cohort refunding into a small July denominator is the
+  simplest explanation for the hump, and it is **untested** — the finance feed
+  cannot link a refund to the order it came from, so the cohort story cannot be
+  confirmed or ruled out from this data.
+- **69% of July's US refunds are one SKU** (`8K-VA60-WNJK`: 2,737 of 3,962, on
+  19,191 of 27,254 US orders). So the family number is that SKU's number plus a
+  small tail — not a broad quality signal.
+- **The same June→July hump appears in 2025** (8.50% → 10.37%), which is what a
+  seasonal/ordering pattern looks like rather than a one-off product failure.
+
+Two more limits: refunds lag orders, so a low-volume SKU-month can show a rate
+above 100% (`SC-XL-B`, July 2026: 54 refunds on 2 orders) — read those at family
+level, never per SKU-month, and the view NULLs them below 100 orders; and
+`orders`/`units` are Amazon orders while the complaints are review records, so
+neither ratio is a review rate.
+
+### Month-over-month comparisons are only valid within one feed (R4)
+
+The complaint corpus is fed by three sources that do **not** run the whole time:
+
+| feed | records run | ends |
+|---|---|---|
+| `fba` | 2025-07-18 → 2026-10-19 | still running |
+| `ncx` | 2024-09-27 → **2026-07-16** | stopped mid-July |
+| `amazon` | 2023-01-29 → **2026-08-29** | stopped end of August |
+
+So the all-source rate is a **composition**, and July's peak is partly the feeds
+arriving: of the 510 seat-cushion records in July 2026, **200 came from ncx (140) and
+amazon (60)**. Measured per feed, over the family denominator:
+
+| month | all sources | fba only | ncx | amazon |
+|---|---|---|---|---|
+| 2026-06 | 0.15 | 0.04 | 0.10 | 0.00 |
+| 2026-07 | 1.55 | 0.94 | 0.43 (to the 16th) | 0.18 |
+| 2026-08 | 0.53 | **0.48** | — | 0.04 (to the 29th) |
+| 2026-09 | 1.19 | **1.19** | — | — |
+| 2026-10 (to 19th) | 1.02 | **1.02** | — | — |
+
+**On fba — the only feed present in every month — September is the peak (1.19), not
+July.** That overturns the earlier "July was a product problem" reading. Within fba,
+`Uncomfortable` rises 10 → 13 and `Too Firm` 0 → 7 from July to August, so there
+*is* a real comfort/fit movement — but it is a rise into August, not a July spike.
+The rule, and it applies to every table and chart built from these views:
+
+> **A month-over-month comparison is only valid within a single feed.** Where a
+> feed starts or stops, the mix changes and the level is not comparable with the
+> month before. Quote `source='fba'` for a trend. `v_complaint_rates_by_source` is
+> the view; the app prints the per-feed table with each feed's coverage beside it.
+
 
 ### What this still cannot say
 
@@ -182,28 +306,40 @@ the complaints are review records, so neither ratio is a review rate.
   month varies with the feed (`fba` produced 310 seat-cushion records in July,
   191 in August, 468 in September, on flat order volume). A rate that moves with
   the harvest is not a rate that moved with customers — say "complaint records per
-  100 orders", never "return rate".
+  100 orders", never "return rate". The per-feed split above is the only way to
+  separate a harvest change from a complaint change.
 - `orders` is Amazon orders across marketplaces; the complaints are mostly US
   reviews. The US columns are the same-market check, not a separate model.
 - A month in progress (this month) has a partial numerator and denominator; the
   app excludes today from its per-day rates and the finance feed is daily.
+- A refund cannot be tied to the order that produced it, so **no cohort refund rate
+  exists in this data** — only the period ratio.
 
 ### How to model it in PowerBI
 
 1. Import `v_complaint_rates` (it is a superset of `v_ai_complaints_monthly`, so
    one import replaces the old table; the counts are identical — asserted on every
-   refresh).
-2. **Never** average `complaints_per_100_orders`. It is a per-complaint-code rate:
-   `SUM(orders)` over a SKU-month's rows counts the same orders once per code, so
-   summing or averaging the rate is wrong by the number of codes on that row.
+   refresh) and `v_sku_month_rates` for the pivot pages.
+2. **Never** average `complaints_per_100_orders`, and **never** sum `orders` off
+   `v_complaint_rates` without de-duplicating the SKU-month: the same orders ride on
+   every complaint-code row. On `v_sku_month_rates` the grain is already correct, so
+   `SUM(orders)` there is safe.
 3. Build measures instead:
    - `Orders = SUMX(VALUES(v_complaint_rates[sku], v_complaint_rates[month]), MAX(v_complaint_rates[orders]))`
    - `Records = SUM(v_complaint_rates[n_complaints])`
    - `Records per 100 orders = DIVIDE([Records] * 100, [Orders])` — blank when the
      denominator is blank, which is the NULL rule holding in the model.
+   - `Records per 100 orders (quotable) = CALCULATE([Records per 100 orders], v_complaint_rates[rate_quotable] = 1)`
+     — the floor; a 1-order SKU-month must not produce a level.
+   - `US refund rate = DIVIDE(SUMX(VALUES(...), MAX(refunds_us)), SUMX(VALUES(...), MAX(orders_us)))`
+     restricted to `refund_rate_quotable = 1`.
 4. Put `title_short` on the axis and `sku` in the tooltip (some SKUs are numbers).
 5. `refund_rate_pct` is a SKU-month measure too: aggregate it as
    `SUMX(VALUES(...), MAX(refunds)) / [Orders]`, never as an average of the column.
+6. For a trend, filter **one source** (`v_complaint_rates_by_source`, `source='fba'`)
+   or show the feed on the legend. A line that spans a feed start or stop is not a
+   trend and must not be drawn as one.
+
 
 <!-- sales:start -->
 <!-- generated by gen_powerbi_coverage.py from automation_philip; do not edit by hand -->
@@ -215,7 +351,7 @@ the complaints are review records, so neither ratio is a review rate.
 | `sales_by_sku_month` rows (SKU × month) | **13,293** |
 | seller SKUs with sales | 564 |
 | finance months covered | 2020-09 → 2026-10 |
-| orders / units / refunds in the table | 15,567,092 / 16,641,273 / 874,084 |
+| orders / units / refunds in the table | 15,567,402 / 16,641,609 / 874,102 |
 | SKU-months with finance rows but 0 orders | 561 (the rate is NULL there) |
 | `v_complaint_rates` rows | 4,527 |
 | of those, with a sales denominator | 4,514 (99.7%) |
