@@ -19,7 +19,11 @@ Routes
                     preceding equal-length period, all from the same WHERE clause)
   /review/<id>      one review: confirm / correct / reject, in place - and revise a
                     decision that was already made (the new row supersedes, the old
-                    one stays as history)
+                    one stays as history). Opened as a slide-over drawer ON
+                    /reviews (?partial=1 returns just the panel's inner HTML, and a
+                    decision posts back into it), so reviewing never costs the
+                    filters or the page; the bare URL still renders a full page for
+                    a direct link.
   /monthly          SKU x month x complaint rollup (the PowerBI grain), paginated
   /monthly.csv      the same rollup, same filters; a SKU-month's orders/units/
                     refunds ride on ONE row (exposure_row=1) so SUM is correct
@@ -232,7 +236,203 @@ td.num,th.num{text-align:right}
 .who a:hover{color:var(--ink);text-decoration:none;border-bottom-color:var(--ink)}
 .decision{background:#fafafc;border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:12px;font-size:13px}
 .decision b{font-weight:650}
+
+/* ---------------------------------------------------------------- row links
+   The row is the control: pointer, a hover wash and an explicit "open" in the
+   last cell, because a table that opens something must look like it does. */
+tr.rowlink{cursor:pointer}
+tr.rowlink:hover td{background:#f5f8ff}
+tr.rowlink:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+td.open-cell{white-space:nowrap;color:var(--mut);font-size:12px;text-align:right}
+tr.rowlink:hover td.open-cell{color:var(--accent)}
+td.open-cell a{color:inherit;text-decoration:none}
+.chev{display:inline-block;margin-left:3px;font-size:15px;line-height:1;transform:translateY(1px)}
+a.lnk{color:var(--accent);text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:1px}
+a.lnk:hover{text-decoration-thickness:2px}
+
+/* ---------------------------------------------------------------- drawer
+   One panel, 620px, its own scroll, over a dimmed backdrop. It replaces the
+   navigation to a second tab: the table stays behind it and the URL stays put. */
+body.drw-open{overflow:hidden}
+.drw-bd{position:fixed;inset:0;z-index:55;background:rgba(15,23,42,.44);opacity:0;
+  transition:opacity .18s ease}
+.drw-bd.on{opacity:1}
+.drw{position:fixed;top:0;right:0;bottom:0;z-index:60;width:100%;max-width:620px;
+  transform:translateX(101%);transition:transform .22s cubic-bezier(.32,.72,0,1);will-change:transform}
+.drw.on{transform:none}
+.drw-panel{position:relative;height:100%;overflow-y:auto;overscroll-behavior:contain;
+  background:var(--card);border-left:1px solid var(--line);box-shadow:-24px 0 60px rgba(16,24,40,.18)}
+.drw-x{position:absolute;top:14px;right:16px;z-index:2;display:flex;align-items:center;justify-content:center;
+  width:34px;height:34px;padding:0;border:1px solid var(--line);border-radius:8px;background:#fff;
+  color:var(--mut);font-size:19px;line-height:1;cursor:pointer}
+.drw-x:hover{background:#f6f6fa;color:var(--ink)}
+.drw-body{padding:22px 24px 40px;font-size:14px;line-height:1.6;color:var(--ink)}
+.drw-head{padding-right:46px}
+.drw-kicker,.drw-meta,.drw-sub{font-size:12px;line-height:1.55;color:var(--mut)}
+.drw-title{font-size:20px;font-weight:650;letter-spacing:-.01em;line-height:1.3;margin:4px 0 6px}
+.drw-sec{margin-top:24px}
+.drw-sec>h3{font-size:20px;line-height:1.25;font-weight:650;letter-spacing:-.01em;margin:0 0 10px}
+.drw-sec .lead{font-size:12px;color:var(--mut);line-height:1.55;margin:0 0 10px}
+.drw-quote{border:1px solid var(--line);border-radius:8px;background:#fafafc;padding:16px;
+  font-size:14px;line-height:1.65;white-space:pre-wrap}
+.drw-quote .txtwrap{padding:0 0 10px;border-bottom:1px solid #f1f1f5;margin-bottom:10px}
+.drw-quote .txtwrap:last-child{border:none;margin:0;padding:0}
+.lblrow{display:flex;gap:12px;align-items:baseline;padding:4px 0;font-size:14px;line-height:1.5}
+.lblrow .k{flex:0 0 108px;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut)}
+.dec{border:1px solid var(--line);border-radius:8px;background:#fafafc;padding:15px 16px;
+  font-size:14px;line-height:1.6}
+.dec .lblrow:first-child{padding-top:0}
+.dec .lblrow:last-child{padding-bottom:0}
+.dec .m{font-size:12px;line-height:1.55;color:var(--mut);margin-top:6px}
+/* One border treatment for every boxed block in the panel: 1px, 8px radius. A
+   neighbour with a heavier or rounder border reads as a different kind of thing. */
+.act{border:1px solid var(--line);border-radius:8px;background:#fff;padding:16px;margin:0 0 12px;
+  display:flex;flex-direction:column;gap:12px}
+.act h4{font-size:14px;font-weight:650;line-height:1.4;margin:0}
+.act p{font-size:14px;line-height:1.55;color:var(--mut);margin:0}
+.act label{margin:0}
+.act select,.act input,.act textarea{width:100%;min-width:0}
+.act .btnrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.act .hint{font-size:12px;color:var(--mut)}
+.act button{align-self:flex-start}
+.hist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.hist li{border-left:2px solid var(--line);padding:1px 0 1px 12px;font-size:14px;line-height:1.55}
+.hist li.cur{border-left-color:var(--accent)}
+.hist .m{font-size:12px;line-height:1.55;color:var(--mut);margin-top:2px}
+.kv{display:grid;grid-template-columns:118px 1fr;gap:7px 14px;margin:0;font-size:14px;line-height:1.5}
+.kv dt{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);padding-top:2px}
+.kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+@media(max-width:680px){.drw{max-width:100%}.drw-body{padding:18px 16px 32px}}
 """
+
+
+# The drawer's client half. Kept next to the page it belongs to rather than in a
+# static file: app.py is deployed on its own (deploy_on_box.sh), so an external
+# asset would 404 on the box. Progressive enhancement: the "open" anchor and both
+# forms are real links/forms, so without JS the review is still reachable.
+DRAWER_JS = """<script>
+(function () {
+  var dlg = document.getElementById('drw'),
+      bd  = document.getElementById('drwBd'),
+      body = document.getElementById('drwBody'),
+      panel = document.getElementById('drwPanel'),
+      closeBtn = document.getElementById('drwClose'),
+      lastFocus = null, curId = null;
+
+  if (!dlg || !bd || !body) return;
+
+  function isOpen() { return !dlg.hidden; }
+
+  function markRow(id, state) {
+    if (!id || !state) return;
+    var tr = document.querySelector('tr[data-review-id="' + id + '"]');
+    if (!tr) return;
+    var pill = tr.querySelector('[data-pill]');
+    if (!pill) return;
+    var label = state === 'rejected' ? 'not a complaint'
+              : state === 'corrected' ? 'corrected' : 'confirmed';
+    pill.textContent = label;
+    pill.className = 'pill ' + (state === 'rejected' ? 'bad' : 'ok');
+  }
+
+  function wireForms() {
+    Array.prototype.forEach.call(body.querySelectorAll('form.act'), function (f) {
+      f.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var btn = ev.submitter || f.querySelector('button[value]'),
+            fd  = new FormData(f),
+            enc = [];
+        if (btn && btn.name) fd.set(btn.name, btn.value);
+        fd.set('drawer', '1');
+        // URL-encoded, not multipart: the app reads the body with parse_qs, so a
+        // multipart FormData posts arrive as an empty form ("Unknown action").
+        fd.forEach(function (v, k) {
+          enc.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+        });
+        f.classList.add('busy');
+        Array.prototype.forEach.call(f.querySelectorAll('button'), function (b) { b.disabled = true; });
+        fetch(f.getAttribute('action'), {
+          method: 'POST', body: enc.join('&'),
+          headers: { 'X-Drawer': '1', 'Content-Type': 'application/x-www-form-urlencoded' },
+          credentials: 'same-origin'
+        }).then(function (r) {
+          var st = r.headers.get('X-Row-State');
+          if (st) markRow(curId, st);
+          return r.text();
+        }).then(function (h) {
+          body.innerHTML = h;
+          wireForms();
+          panel.scrollTop = 0;
+          var first = body.querySelector('button, select, input, a');
+          if (first) first.focus();
+        }).catch(function () {
+          f.classList.remove('busy');
+          Array.prototype.forEach.call(f.querySelectorAll('button'), function (b) { b.disabled = false; });
+        });
+      });
+    });
+  }
+
+  function open(id) {
+    lastFocus = document.activeElement;
+    curId = String(id);
+    fetch('/review/' + curId + '?partial=1', {
+      headers: { 'X-Drawer': '1' }, credentials: 'same-origin'
+    }).then(function (r) { return r.text(); }).then(function (h) {
+      body.innerHTML = h;
+      wireForms();
+      dlg.hidden = false; bd.hidden = false;
+      requestAnimationFrame(function () {
+        dlg.classList.add('on'); bd.classList.add('on');
+        document.body.classList.add('drw-open');
+        panel.scrollTop = 0;
+        var first = body.querySelector('button, select, input, a');
+        if (first) first.focus();
+      });
+    });
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    dlg.classList.remove('on'); bd.classList.remove('on');
+    document.body.classList.remove('drw-open');
+    setTimeout(function () { dlg.hidden = true; bd.hidden = true; }, 200);
+    curId = null;
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+
+  document.addEventListener('click', function (ev) {
+    var tr = ev.target.closest && ev.target.closest('tr.rowlink');
+    if (!tr) return;
+    var a = ev.target.closest('a');
+    if (a && !a.classList.contains('rowopen')) return;   // Amazon links win
+    ev.preventDefault();
+    var id = tr.getAttribute('data-review-id');
+    if (id && id !== curId) open(id);
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && isOpen()) { close(); return; }
+    if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches &&
+        ev.target.matches('tr.rowlink')) {
+      ev.preventDefault();
+      open(ev.target.getAttribute('data-review-id'));
+    }
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', function () { close(); });
+  bd.addEventListener('click', function () { close(); });
+
+  // A #review-<id> link still opens the panel (no reload): the drawer is the
+  // destination, the list is the page.
+  function fromHash() {
+    var m = /^#review-(\\d+)$/.exec(location.hash);
+    if (m) open(m[1]); else close();
+  }
+  window.addEventListener('hashchange', fromHash);
+  fromHash();
+})();
+</script>"""
 
 
 # ---------------------------------------------------------------- plumbing
@@ -283,7 +483,8 @@ def page(title, body, active="", msg="", err=False, ctx=None):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · AI Complaint Validation</title><style>{CSS}</style></head>
 <body><header><span class="brand">AI Complaint Validation</span><nav>{nav}</nav>{who_html}</header>
-<main>{ctx.get("banner", "")}{flash}{body}</main></body></html>"""
+<main>{ctx.get("banner", "")}{flash}{body}</main>
+{ctx.get("scripts", "")}</body></html>"""
 
 
 # ---------------------------------------------------------------- review text
@@ -458,23 +659,65 @@ NO_CODE = "(no complaint assigned)"
 DISPLAY_LABEL = {"vague complaint": "Unspecified"}
 
 
-def display_label(c):
+def display_label(c, cur=None):
+    """The one label reader. With a cursor it also resolves the TAXONOMY spelling,
+    case-insensitively: the classifier wrote 'Not Needed/unwanted' while the
+    taxonomy says 'Not Needed/Unwanted', and printing both for one complaint reads
+    as two complaints."""
+    if cur is not None:
+        c = canonical(cur, c)
     return DISPLAY_LABEL.get(norm(c), c)
 
+
+# complaint_codes is the taxonomy: one spelling per code. The classifier emits its
+# own casing ('Not Needed/unwanted', 'Not As Advertised/misleading'), so anything
+# displayed goes through this map rather than being echoed as stored. Cached for a
+# minute because every page renders dozens of labels and the table changes once a
+# week at most.
+_TAXONOMY = {"at": 0.0, "map": {}}
+
+
+def taxonomy(cur, ttl=60):
+    now = time.time()
+    if _TAXONOMY["map"] and now - _TAXONOMY["at"] < ttl:
+        return _TAXONOMY["map"]
+    try:
+        cur.execute("SELECT code FROM complaint_codes")
+        _TAXONOMY["map"] = {norm(r["code"]): r["code"] for r in cur.fetchall() if r["code"]}
+        _TAXONOMY["at"] = now
+    except Exception:                                        # noqa: BLE001
+        pass                       # a label is not worth a 500: fall back to stored
+    return _TAXONOMY["map"]
+
+
+def canonical(cur, c):
+    """Taxonomy spelling for a stored complaint, case-insensitive; unchanged if unknown."""
+    if not c:
+        return c
+    return taxonomy(cur).get(norm(c), c)
 
 
 def amz_asin(asin):
     if not asin:
         return "—"
     return (f'<a href="{AMZ_DP}{urllib.parse.quote(asin)}" target="_blank" '
-            f'rel="noopener" class="mono">{esc(asin)}</a>')
+            f'rel="noopener" class="mono lnk" data-ext="1">{esc(asin)}</a>')
 
 
 def amz_sku(sku):
     if not sku:
         return "—"
     return (f'<a href="{AMZ_SKU_SEARCH}{urllib.parse.quote(sku)}" target="_blank" '
-            f'rel="noopener" class="mono">{esc(sku)}</a>')
+            f'rel="noopener" class="mono lnk" data-ext="1">{esc(sku)}</a>')
+
+
+def short_title(t, n=90):
+    """Truncate on a word boundary: 'for Hip and Bac' reads as a bug, '…Bac…' not much better."""
+    t = (t or "").strip()
+    if len(t) <= n:
+        return t
+    cut = t[:n].rsplit(" ", 1)[0].rstrip(" ,-–—")
+    return cut + "…"
 
 
 def product_cell(r):
@@ -513,7 +756,10 @@ def build_where(q):
         else:
             where.append("v.sku=%s"); args.append(q["sku"].strip())
     if q.get("complaint"):
-        where.append("v.final_complaint=%s"); args.append(q["complaint"])
+        # Case-insensitive on purpose: the picklist is the TAXONOMY spelling while
+        # older rows store the classifier's casing ('Not Needed/unwanted'). An exact
+        # match would filter 7,861 records down to nothing.
+        where.append("LOWER(v.final_complaint)=LOWER(%s)"); args.append(q["complaint"].strip())
     if q.get("source"):
         where.append("v.source=%s"); args.append(q["source"])
     if q.get("country"):
@@ -1579,7 +1825,7 @@ def mix_block(cur, q, n):
                  if nocomment.get(c, 0) else "")
         rows.append(
             f'<tr data-code="{esc(c)}" data-n="{k}" data-win="{curw_all.get(c, 0)}" data-delta="{dv}">'
-            f'<td class="c" title="{esc(c)}">{esc(display_label(c))}</td>'
+            f'<td class="c" title="{esc(c)}">{esc(display_label(c, cur))}</td>'
             f'<td class="sh">{share:.1f}%{was}</td>'
             f'<td class="n">{k:,}{win}{nocom}</td>'
             f'<td style="width:30%"><div class="mixbar" style="width:{max(2, int(k * 100.0 / mx))}%"></div></td>'
@@ -1609,7 +1855,7 @@ def mix_block(cur, q, n):
             s = k * 100.0 / n
             ps = (f' <span style="color:#9ca3af">(was {priorw_all.get(c, 0) * 100.0 / prior_all_n:.1f}%)</span>'
                   if (prior_all_n and rate_ok) else "")
-            parts.append(f'<b>{esc(display_label(c))}</b> {s:.1f}%{ps}')
+            parts.append(f'<b>{esc(display_label(c, cur))}</b> {s:.1f}%{ps}')
         lead = ('<p class="mixnote"><b>Share of complaint records — the headline:</b> '
                 + " · ".join(parts)
                 + f'. Shares add to 100% of the {n:,} matching records and need no units '
@@ -1629,7 +1875,7 @@ def mix_block(cur, q, n):
             for delta, c in up:
                 pv = priorw.get(c, 0)
                 tail = _riser_tail(delta + pv, pv, cur_feed, prior_feed)
-                parts.append(f'<b>{esc(display_label(c))}</b> +{delta:,} records ({tail})')
+                parts.append(f'<b>{esc(display_label(c, cur))}</b> +{delta:,} records ({tail})')
             riser = (f' Biggest increase{"s" if len(up) != 1 else ""} by record count on '
                      f'{esc(src_label)} against {prior_feed:,} feed days before: '
                      + " · ".join(parts) + ".")
@@ -1850,7 +2096,7 @@ def p_dashboard(cur, q, msg="", ctx=None):
     top = cur.fetchall()
     mx = max([r["n"] for r in top], default=1)
     bars = "".join(
-        f'<tr><td><a href="/reviews?complaint={urllib.parse.quote(r["complaint"])}">{esc(display_label(r["complaint"]))}</a></td>'
+        f'<tr><td><a href="/reviews?complaint={urllib.parse.quote(r["complaint"])}">{esc(display_label(r["complaint"], cur))}</a></td>'
         f'<td class="mono num">{r["n"]:,}</td>'
         f'<td><div style="height:8px;border-radius:4px;background:var(--accent);opacity:.85;width:{int(r["n"]/mx*100)}%"></div></td></tr>'
         for r in top)
@@ -1912,23 +2158,30 @@ def p_reviews(cur, q, msg="", ctx=None):
 
     trs = []
     for r in rows:
+        rid = r["review_id"]
         pill = ""
         if r["human_decision"] == "accepted":
-            pill = '<span class="pill ok">confirmed</span>'
+            pill = '<span class="pill ok" data-pill>confirmed</span>'
         elif r["human_decision"] == "corrected":
-            pill = '<span class="pill ok">corrected</span>'
+            pill = '<span class="pill ok" data-pill>corrected</span>'
         elif r["human_decision"] == "rejected":
-            pill = '<span class="pill bad">not a complaint</span>'
+            pill = '<span class="pill bad" data-pill>not a complaint</span>'
         elif r["is_new_code"]:
-            pill = '<span class="pill new">new code</span>'
+            pill = '<span class="pill new" data-pill>new code</span>'
         elif r["needs_review"]:
-            pill = '<span class="pill bad">needs check</span>'
-        if r["human_decision"] == "corrected" and r["ai_complaint"]:
-            label = (f'<b>{esc(display_label(r["final_complaint"]) or "")}</b> '
-                     f'<span class="meta">(was {esc(display_label(r["ai_complaint"]))})</span>')
+            pill = '<span class="pill bad" data-pill>needs check</span>'
         else:
-            label = esc(display_label(r["final_complaint"]) or "—")
-        trs.append(f"""<tr>
+            pill = '<span class="pill" data-pill>unreviewed</span>'
+        # Both sides of a correction go through the taxonomy spelling, so the row
+        # never shows two casings of one code side by side.
+        if r["human_decision"] == "corrected" and r["ai_complaint"]:
+            label = (f'<b>{esc(display_label(r["final_complaint"], cur) or "")}</b> '
+                     f'<span class="meta">(was {esc(display_label(r["ai_complaint"], cur))})</span>')
+        else:
+            label = esc(display_label(r["final_complaint"], cur) or "—")
+        # The row itself is the control (see DRAWER_JS); the anchor is the
+        # no-JS path to the same review, never a second tab for a JS user.
+        trs.append(f"""<tr class="rowlink" data-review-id="{rid}" tabindex="0">
           <td class="mono">{esc(r["review_date"])}</td>
           <td>{product_cell(r)}</td>
           <td class="mono">{esc(r["parent"] or "—")}</td>
@@ -1936,22 +2189,30 @@ def p_reviews(cur, q, msg="", ctx=None):
           <td>{amz_asin(r["asin"])}</td>
           <td>{label}<br>{pill}</td>
           <td class="meta" style="min-width:300px">{text_snippet(r["txt"])}</td>
-          <td><a href="/review/{r['review_id']}">open</a></td></tr>""")
+          <td class="open-cell"><a class="rowopen" href="/review/{rid}">open<span class="chev">›</span></a></td></tr>""")
 
     products = options(cur, "SELECT product k, COUNT(*) n FROM v_ai_complaints WHERE product IS NOT NULL GROUP BY product ORDER BY n DESC")
     parents = options(cur, "SELECT parent k, COUNT(*) n FROM v_ai_complaints WHERE parent IS NOT NULL GROUP BY parent ORDER BY n DESC")
     families = options(cur, "SELECT product_family k, COUNT(*) n FROM v_ai_complaints WHERE product_family IS NOT NULL GROUP BY product_family ORDER BY n DESC")
     sources = options(cur, "SELECT source k, COUNT(*) n FROM v_ai_complaints WHERE source IS NOT NULL GROUP BY source ORDER BY n DESC")
     countries = options(cur, "SELECT country k, COUNT(*) n FROM v_ai_complaints WHERE country IS NOT NULL GROUP BY country ORDER BY n DESC")
-    complaints = options(cur, """SELECT final_complaint k, COUNT(*) n FROM v_ai_complaints
-                                  WHERE final_complaint IS NOT NULL GROUP BY final_complaint ORDER BY n DESC""")
+    # Grouped by the taxonomy label, not the stored string: 'Not Needed/unwanted'
+    # and 'Not Needed/Unwanted' are one complaint and must be one option with one
+    # count, or the filter list shows the same code twice.
+    raw = options(cur, """SELECT final_complaint k, COUNT(*) n FROM v_ai_complaints
+                          WHERE final_complaint IS NOT NULL GROUP BY final_complaint""")
+    merged = {}
+    for k, cnt in raw:
+        lbl = display_label(k, cur)
+        merged[lbl] = merged.get(lbl, 0) + cnt
+    complaints = sorted(merged.items(), key=lambda kv: -kv[1])
 
     statuses = "".join(f'<option value="{v}"{" selected" if q.get("status")==v else ""}>{lbl}</option>'
                        for v, lbl in [("new", "Unreviewed"), ("flagged", "Flagged, unreviewed"),
                                       ("decided", "Decided"), ("newcode", "New code")])
     # The complaint dropdown keeps the stored value (it is a filter, so it must
     # match the column) and only changes what it reads as.
-    complaint_select = select('complaint', [(k, display_label(k), n) for k, n in complaints],
+    complaint_select = select('complaint', [(k, display_label(k, cur), n) for k, n in complaints],
                               q.get("complaint") or "")
     # F8: echo which SKU values the filter actually matched. "sku=6" used to mean
     # "anything containing 6" (3,655 rows) when the SKU really called 6 has 2,613;
@@ -1970,7 +2231,8 @@ def p_reviews(cur, q, msg="", ctx=None):
   · <b>{n_co:,}</b> return-reason only · <b>{n_rv:,}</b> review text (the amazon feed){sku_echo}<br>
   page {pg} of {max(1, (n + PAGE_SIZE - 1)//PAGE_SIZE)} · showing {len(rows)}
   · <a href="/export.csv?{esc(qstr(q))}">export CSV</a>
-  · <a href="/export.csv?{esc(qstr(q, text='1'))}">export with text</a></p>
+  · <a href="/export.csv?{esc(qstr(q, text='1'))}">export with text</a>
+  <br>Click any row to open that record here; SKU and ASIN open Amazon in a new tab.</p>
 <form class="filters" method="get">
   <div><label>Search text or title</label><input name="q" value="{esc(q.get('q',''))}" placeholder="seat cushion"></div>
   <div><label>Product family</label>{select('family', families, q.get('family'))}</div>
@@ -2000,7 +2262,16 @@ def p_reviews(cur, q, msg="", ctx=None):
 <tbody>{''.join(trs) or '<tr><td colspan="8" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
 <div class="pager">{f'<a href="/reviews?{esc(qstr(q, page=pg-1))}">← previous</a>' if pg > 1 else ''}
   <span class="sp">page {pg}</span>
-  {f'<a href="/reviews?{esc(qstr(q, page=pg+1))}">next →</a>' if off + PAGE_SIZE < n else ''}</div>"""
+  {f'<a href="/reviews?{esc(qstr(q, page=pg+1))}">next →</a>' if off + PAGE_SIZE < n else ''}</div>
+<div class="drw-bd" id="drwBd" hidden></div>
+<aside class="drw" id="drw" role="dialog" aria-modal="true" aria-label="Review detail" hidden>
+  <div class="drw-panel" id="drwPanel">
+    <button class="drw-x" id="drwClose" type="button" aria-label="Close review">×</button>
+    <div class="drw-body" id="drwBody"></div>
+  </div>
+</aside>"""
+    ctx = dict(ctx or {})
+    ctx["scripts"] = DRAWER_JS
     return page("Complaint records", body, "/reviews", msg, ctx=ctx)
 
 
@@ -2023,10 +2294,20 @@ def decision_text(decision, new_complaint):
     return esc(decision or "")
 
 
-def p_review(cur, rid, q, msg="", err=False, ctx=None):
+def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
+    """One record.
+
+    partial=True returns ONLY the drawer's inner HTML (no <html>, nav or footer):
+    /reviews fetches it into the slide-over panel, so a decision never costs the
+    reviewer their filters, their page or their scroll position. The same function
+    renders the standalone page for a direct link, so the two cannot drift.
+    """
     cur.execute("SELECT * FROM v_ai_complaints v WHERE v.review_id=%s", (rid,))
     r = cur.fetchone()
     if not r:
+        if partial:
+            return ('<div class="drw-head"><div class="drw-kicker">Review</div>'
+                    '<div class="drw-title">No such review</div></div>')
         return page("Not found", '<div class="card"><div class="empty">No such review.</div></div>',
                     "/reviews", msg or "No such review.", True, ctx)
     cur.execute("""SELECT id, decision, new_complaint, reviewed_by, reviewed_by_name, note, created_at
@@ -2034,72 +2315,142 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None):
     prior = cur.fetchall()
     state = prior[0] if prior else None
 
+    # Every label on this panel is the taxonomy spelling, resolved case-insensitively
+    # against complaint_codes. The AI writes 'Not Needed/unwanted'; the taxonomy says
+    # 'Not Needed/Unwanted', and printing the AI's casing beside the taxonomy's is
+    # what made the page look like it had two of everything.
+    ai = canonical(cur, r["ai_complaint"])
+    rep = canonical(cur, r["final_complaint"])
+    second = canonical(cur, r["second_complaint"])
+
     by_cat = defaultdict(list)
     for c in approved_codes(cur):
         by_cat[c["category"] or "Uncategorised"].append(c["code"])
     groups = "".join(
         f'<optgroup label="{esc(cat)}">' + "".join(
-            f'<option value="{esc(c)}"{" selected" if c == r["final_complaint"] else ""}>{esc(c)}</option>'
+            # No preselection: "Correct" must be an explicit choice, or a stray
+            # click on Save would record a decision nobody made. The Label section
+            # above already states what the record reports as today.
+            f'<option value="{esc(c)}">{esc(c)}</option>'
             for c in codes) + "</optgroup>"
         for cat, codes in sorted(by_cat.items()))
 
-    prior_html = "".join(
-        f'<div class="meta">· {esc(p["created_at"])} — {decision_text(p["decision"], p["new_complaint"])}'
-        f' · {reviewer_label(p["reviewed_by"], p["reviewed_by_name"])}'
-        f'{" — " + esc(p["note"]) if p["note"] else ""}'
-        f'{" <b>· current</b>" if p is state else ""}</div>' for p in prior) \
-        or '<div class="meta">No decisions yet.</div>'
+    hist = []
+    for p in prior:
+        cur_flag = " cur" if p is state else ""
+        badge = ' <span class="pill ok">current</span>' if p is state else ""
+        hist.append(
+            f'<li class="{cur_flag.strip()}">'
+            f'{decision_text(p["decision"], canonical(cur, p["new_complaint"]))}{badge}'
+            f'<div class="m">{esc(p["created_at"])} · {reviewer_label(p["reviewed_by"], p["reviewed_by_name"])}'
+            f'{" · " + esc(p["note"]) if p["note"] else ""}</div></li>')
+    prior_html = ('<ul class="hist">' + "".join(hist) + "</ul>") if hist \
+        else '<div class="drw-meta">No decisions recorded yet.</div>'
 
     if state:
         decision_box = (
-            f'<div class="decision"><b>Decided:</b> {decision_text(state["decision"], state["new_complaint"])}'
-            f' · {reviewer_label(state["reviewed_by"], state["reviewed_by_name"])}'
+            f'<div class="dec"><b>Decided:</b> '
+            f'{decision_text(state["decision"], canonical(cur, state["new_complaint"]))}'
+            f'<div class="m">by {reviewer_label(state["reviewed_by"], state["reviewed_by_name"])}'
             f' · {esc(state["created_at"])}'
-            f'{"<br>note: " + esc(state["note"]) if state["note"] else ""}'
-            f'<br><span class="meta">Changing it below <b>supersedes</b> this decision — the row above stays in the '
-            f'history, and every figure switches to your new call.</span></div>')
+            f'{"<br>note: " + esc(state["note"]) if state["note"] else ""}</div>'
+            f'<div class="m">Recording another decision below <b>supersedes</b> this one: the row '
+            f'above stays in the history and every figure switches to the new call.</div></div>')
     else:
-        decision_box = ('<div class="decision">No decision yet. Whatever you record below is what the dashboard, '
-                        'the monthly rollup and the export will use for this review.</div>')
+        decision_box = (
+            '<div class="dec"><b>No decision yet.</b>'
+            '<div class="m">Whatever you record below is what the dashboard, the monthly rollup '
+            'and the export use for this record.</div></div>')
 
     warn = ""
     if not r["has_prose"]:
-        warn = ('<div class="syncbar bad" style="margin:12px 0"><b>Code only.</b> This row has no customer comment — '
-                'the return reason is the whole text, so there is little to check the label against. '
-                'You can still decide it.</div>')
+        warn = ('<div class="syncbar bad" style="margin:0 0 4px"><b>Code only.</b> This row has no '
+                'customer comment — the return reason is the whole text, so there is little to check '
+                'the label against. You can still decide it.</div>')
 
-    body = f"""<h1>Review {esc(rid)}</h1>
-<p class="sub">{product_cell(r)} · parent {esc(r["parent"] or "—")} · SKU {amz_sku(r["sku"])}
-  · ASIN {amz_asin(r["asin"])}<br>{esc(r["review_date"])} · {esc(r["source"] or "")} {esc(r["country"] or "")}
-  {("· order " + esc(r["order_id"])) if r["order_id"] else ""}</p>
+    conf_card = ""
+    if ai:
+        conf_card = f"""<form class="act" method="post" action="/review/{rid}">
+    <h4>Confirm</h4>
+    <p>The AI's label is right for this record. One click, recorded against your login.</p>
+    <div class="btnrow"><button class="primary" name="action" value="accept">Confirm “{esc(ai)}”</button></div>
+  </form>"""
+
+    title_tag = "h1" if not partial else "div"
+    flash = (f'<div class="flash{" err" if err else ""}" style="margin:0 0 16px">{esc(msg)}</div>'
+             if msg else "")
+    who_name = esc((ctx or {}).get("who", {}).get("name", "unknown"))
+
+    inner = f"""<div class="drw-head">
+  <div class="drw-kicker">Review {esc(rid)} · {esc(r["review_date"])} · {esc(r["source"] or "")} {esc(r["country"] or "")}</div>
+  <{title_tag} class="drw-title">{esc(r["product"] or "Unknown product")}{" — " + esc(short_title(r["title"])) if r["title"] else ""}</{title_tag}>
+  <div class="drw-sub">parent {esc(r["parent"] or "—")}{(" · order " + esc(r["order_id"])) if r["order_id"] else ""}</div>
+</div>
+{flash}
 {warn}
-<div class="review">
-  <div>
-    <div class="text" style="padding:0;background:#fff">{text_html(r["review_text"])}</div>
-    <div style="margin-top:14px" class="meta">AI assigned <b>{esc(r["ai_complaint"] or "—")}</b>
-      {("· category " + esc(r["ai_category"])) if r["ai_category"] else ""}
-      {("· second choice " + esc(r["second_complaint"])) if r["second_complaint"] else ""}</div>
-    <div style="margin-top:4px" class="meta">Reporting as <b>{esc(r["final_complaint"] or "—")}</b>
-      {("· " + esc(r["final_category"])) if r["final_category"] else ""}</div>
-    <div style="margin-top:16px">{decision_box}</div>
-    <div style="margin-top:12px"><b class="meta">History</b>{prior_html}</div>
+<div class="drw-sec">
+  <h3>Customer comment</h3>
+  <div class="drw-quote">{text_html(r["review_text"])}</div>
+</div>
+<div class="drw-sec">
+  <h3>Label</h3>
+  <div class="dec">
+    <div class="lblrow"><span class="k">AI assigned</span>
+      <span><b>{esc(ai or "—")}</b>{(" · " + esc(r["ai_category"])) if r["ai_category"] else ""}</span></div>
+    {f'<div class="lblrow"><span class="k">Second choice</span><span class="drw-meta">{esc(second)}</span></div>' if second else ""}
+    <div class="lblrow"><span class="k">Reporting as</span>
+      <span><b>{esc(rep or "—")}</b>{(" · " + esc(r["final_category"])) if r["final_category"] else ""}</span></div>
   </div>
-  <div class="card" style="padding:14px">
-    <form method="post" action="/review/{rid}">
-      {f'<label>Confirm the AI label</label><button class="primary" name="action" value="accept" style="width:100%;margin-bottom:14px">Confirm “{esc(r["ai_complaint"])}”</button>' if r["ai_complaint"] else '<div class="meta" style="margin-bottom:12px">The AI assigned no code to this row — pick one below, or mark it not a complaint.</div>'}
-      <label>Correct it</label>
-      <select name="pick" style="width:100%;margin-bottom:8px"><option value="">choose a code…</option>{groups}</select>
-      <input name="note" placeholder="optional note" style="width:100%;margin-bottom:8px">
-      <button name="action" value="correct" style="width:100%">Save correction</button>
-    </form>
-    <form method="post" action="/review/{rid}" style="margin-top:10px">
-      <input name="note" placeholder="why (optional)" style="width:100%;margin-bottom:8px">
-      <button class="danger" name="action" value="reject" style="width:100%">Not a complaint / remove from reporting</button>
-    </form>
-    <div class="meta" style="margin-top:10px">Recorded against your login
-      ({esc((ctx or {}).get("who", {}).get("name", "unknown"))}), not a shared account.</div>
-  </div>
+</div>
+<div class="drw-sec">
+  <h3>Decision</h3>
+  {decision_box}
+</div>
+<div class="drw-sec">
+  <h3>Record a decision</h3>
+  <p class="lead">Three separate actions. Each note is optional and is stored with the decision it belongs to.</p>
+  {conf_card}
+  <form class="act" method="post" action="/review/{rid}">
+    <h4>Correct</h4>
+    <p>{("Pick the code this record should report as." if ai else "The AI assigned no code — pick the one this record should report as, or mark it not a complaint below.")}
+      The current label stays in the history.</p>
+    <div><label for="pick-{rid}">Complaint code</label>
+      <select id="pick-{rid}" name="pick"><option value="">choose a code…</option>{groups}</select></div>
+    <div><label for="note-{rid}">Note (optional)</label>
+      <input id="note-{rid}" name="note" placeholder="Why you changed it"></div>
+    <div class="btnrow"><button name="action" value="correct">Save correction</button></div>
+  </form>
+  <form class="act danger" method="post" action="/review/{rid}">
+    <h4>Not a complaint</h4>
+    <p>Removes this record from complaint reporting — the dashboard, the monthly rollup and the export.</p>
+    <div><label for="rnote-{rid}">Reason (optional)</label>
+      <input id="rnote-{rid}" name="note" placeholder="e.g. delivery status, not a product complaint"></div>
+    <div class="btnrow"><button class="danger" name="action" value="reject">Mark not a complaint</button></div>
+  </form>
+  <p class="lead">Recorded against your login ({who_name}), not a shared account.</p>
+</div>
+<div class="drw-sec">
+  <h3>History</h3>
+  {prior_html}
+</div>
+<div class="drw-sec">
+  <h3>Record details</h3>
+  <dl class="kv">
+    <dt>Review</dt><dd class="mono">{esc(rid)}</dd>
+    <dt>Date</dt><dd>{esc(r["review_date"])}</dd>
+    <dt>Source</dt><dd>{esc(r["source"] or "—")} {esc(r["country"] or "")}</dd>
+    <dt>Order</dt><dd class="mono">{esc(r["order_id"] or "—")}</dd>
+    <dt>Product</dt><dd>{esc(r["product"] or "—")}</dd>
+    <dt>Parent</dt><dd class="mono">{esc(r["parent"] or "—")}</dd>
+    <dt>SKU</dt><dd>{amz_sku(r["sku"])}</dd>
+    <dt>ASIN</dt><dd>{amz_asin(r["asin"])}</dd>
+  </dl>
 </div>"""
+
+    if partial:
+        return inner
+    body = (f'<p class="sub" style="margin:0 0 4px"><a href="/reviews">← back to complaint records</a></p>'
+            f'<div style="max-width:820px">{inner}</div>')
     return page(f"Review {rid}", body, "/reviews", msg, err, ctx)
 
 
@@ -2317,7 +2668,7 @@ def p_monthly(cur, q, msg="", ctx=None):
         <td>{esc(r["product_family"] or "—")}</td>
         <td class="mono">{esc(r["parent"] or "—")}</td>
         <td>{amz_sku(r["sku"])}{f'<div class="title">{esc(r["title_short"])}</div>' if r["title_short"] else ""}</td>
-        <td>{esc(display_label(r["complaint"]))}</td><td class="meta">{esc(r["category"] or "")}</td>
+        <td>{esc(display_label(r["complaint"], cur))}</td><td class="meta">{esc(r["category"] or "")}</td>
         <td class="mono num">{r["n_complaints"]:,}</td><td class="mono num">{r["pct_of_sku_month"]}%</td>
         <td class="mono num">{int(r["n_human_validated"] or 0):,}</td>
         <td class="mono num">{int(r["n_repeat"] or 0):,}</td>
@@ -2338,7 +2689,7 @@ def p_monthly(cur, q, msg="", ctx=None):
     parents = options(cur, "SELECT parent k, SUM(n) n FROM v_ai_complaints_monthly WHERE parent IS NOT NULL GROUP BY parent ORDER BY n DESC")
     families = options(cur, "SELECT product_family k, SUM(n) n FROM v_ai_complaints_monthly WHERE product_family IS NOT NULL GROUP BY product_family ORDER BY n DESC")
     complaints = options(cur, "SELECT complaint k, SUM(n) n FROM v_ai_complaints_monthly GROUP BY complaint ORDER BY n DESC")
-    complaint_sql = select('complaint', [(k, display_label(k), v) for k, v in complaints], q.get("complaint") or "")
+    complaint_sql = select('complaint', [(k, display_label(k, cur), v) for k, v in complaints], q.get("complaint") or "")
     mf, mt = month_grain(q.get("from")), month_grain(q.get("to"))
     # The months THIS page describes. With an explicit range it is that range; with
     # none it is the contiguous run that holds the corpus (the same rule the chart
@@ -2440,7 +2791,7 @@ def monthly_csv(cur, q):
         # The STORED code in `complaint` — the same value /export.csv writes — so
         # the two exports join. The readable label is a separate column, added
         # here and in export_csv, never a rename of one and not the other.
-        row["complaint_display"] = display_label(row.get("complaint")) or ""
+        row["complaint_display"] = display_label(row.get("complaint"), cur) or ""
         row["grain"] = "sku_month_complaint"
         key = (row.get("sku"), row.get("month"))
         first = key not in seen
@@ -3003,7 +3354,7 @@ def export_csv(cur, q):
         # label rides in its own column. Renaming in one export only split the
         # same row across two vocabularies and broke every join back to the
         # monthly rollup.
-        row["complaint_display"] = display_label(row.get("final_complaint")) or ""
+        row["complaint_display"] = display_label(row.get("final_complaint"), cur) or ""
         wtr.writerow([row.get(c) for c in cols])
     return (buf.getvalue().encode("utf-8-sig"), "text/csv",
             f"attachment; filename=complaint-records-{date.today().isoformat()}.csv")
@@ -3274,8 +3625,24 @@ def app(environ, start_response):
             except ValueError:
                 start_response("404 Not Found", [("Content-Type", "text/plain")])
                 return [b"bad id"]
-            m, e = do_review(cur, rid, parse_form(environ), who)
-            return redirect(start_response, f"/review/{rid}", m, e)
+            f = parse_form(environ)
+            # The drawer posts the same form fields as the standalone page; the only
+            # difference is that it gets the panel back instead of a 302, so the
+            # reviewer does not lose the filtered table behind it.
+            drawer = f.get("drawer") == "1" or environ.get("HTTP_X_DRAWER") == "1"
+            m, e = do_review(cur, rid, f, who)
+            if not drawer:
+                return redirect(start_response, f"/review/{rid}", m, e)
+            cur.execute("""SELECT decision FROM corrections WHERE review_id=%s
+                            ORDER BY id DESC LIMIT 1""", (rid,))
+            now = cur.fetchone()
+            html = p_review(cur, rid, q, m, e, ctx, partial=True)
+            start_response("200 OK", [
+                ("Content-Type", "text/html; charset=utf-8"),
+                ("Cache-Control", "no-store"),
+                ("X-Row-State", "" if e else (now["decision"] if now else "")),
+                ("Content-Length", str(len(html.encode("utf-8"))))])
+            return [html.encode("utf-8")]
 
         if method == "POST" and path == "/codes":
             m, e = do_code(cur, parse_form(environ), who)
@@ -3308,7 +3675,8 @@ def app(environ, start_response):
             except ValueError:
                 start_response("404 Not Found", [("Content-Type", "text/plain")])
                 return [b"bad id"]
-            html = p_review(cur, rid, q, msg, err, ctx)
+            html = p_review(cur, rid, q, msg, err, ctx,
+                            partial=(q.get("partial") == "1" or environ.get("HTTP_X_DRAWER") == "1"))
         elif path == "/codes":
             html = p_codes(cur, q, msg, ctx)
         elif path == "/quality":
