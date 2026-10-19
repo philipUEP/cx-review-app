@@ -105,7 +105,7 @@ say "configuration"
 # (visible in ps) and never committed to the repository. CX_DB_PASSWORD and
 # CX_APP_PASS allow an unattended run (and are how this script is tested); they are
 # read from the environment, not from argv.
-write_env() {                       # $1 = db password, $2 = app password
+write_env() {                       # $1 = db password, $2 = app password, $3 = session secret
   umask 077
   cat >"$APP_DIR/app.env" <<ENV
 CXAPP_DB_HOST=$DBH
@@ -120,6 +120,11 @@ CXAPP_DB_NAME=$DBN
 # (reviewed_by NULL) — no uid is ever guessed or defaulted.
 APP_USERS=$ADMIN_LOGIN:$ADMIN_UID:$APP_PASS
 
+# Signing key for the /login session cookie (HMAC-SHA256). Generated once, never
+# committed, never rotated on re-run — a new value would sign everyone out. The app
+# REFUSES TO START without it rather than falling back to a guessable default.
+APP_SECRET=$APP_SECRET
+
 # Legacy single-login keys (APP_USER/APP_PASS/APP_REVIEWER_UID) are ignored whenever
 # APP_USERS is set. Not duplicated here on purpose: one copy of the password, in the
 # line above. To roll back, restore the commented form by hand.
@@ -132,6 +137,16 @@ CX_APP_URL=${CX_APP_URL:-https://philip.amzmanager.net}
 CX_VOCAB_ADDITIONS=$APP_DIR/app/data/vocab_additions.csv
 ENV
   chmod 600 "$APP_DIR/app.env"
+}
+
+# One generator for the session key, so a fresh install and a backfill cannot
+# produce different shapes (hex only: no shell metacharacters in app.env).
+new_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+  else
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+  fi
 }
 
 if [ -f "$APP_DIR/app.env" ]; then
@@ -191,6 +206,10 @@ else
     APP_PASS="$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 20)"
     [ -n "$APP_PASS" ] || APP_PASS="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 20)"
   fi
+  # The session-cookie key: generated once, never printed (it is not something a
+  # person needs to type) and never derived from the password.
+  APP_SECRET="$(new_secret)"
+  [ -n "$APP_SECRET" ] || die "could not generate APP_SECRET"
   write_env
   echo
   echo "  ┌──────────────────────────────────────────────────────"
@@ -201,6 +220,22 @@ else
   echo "  Shown once. Stored at $APP_DIR/app.env (mode 600), one line per reviewer."
   echo "  Lost it? Delete that file and re-run this script to rotate."
 fi
+
+# ---------------------------------------------------------------- session key
+# Every app.env written before the sign-in page has no APP_SECRET, and app.py now
+# refuses to start without one. Backfill it ONCE: rotating the key on every re-run
+# would silently sign everybody out, so an existing value is never touched.
+if grep -q '^APP_SECRET=.' "$APP_DIR/app.env" 2>/dev/null; then
+  echo "  APP_SECRET already set — left alone (rotating it signs everyone out)"
+else
+  APP_SECRET="$(new_secret)"
+  [ -n "$APP_SECRET" ] || die "could not generate APP_SECRET (openssl and /dev/urandom both failed)"
+  printf '\n# Signing key for the /login session cookie (generated %s).\n# Changing or deleting this line signs every user out.\nAPP_SECRET=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APP_SECRET" >>"$APP_DIR/app.env"
+  chmod 600 "$APP_DIR/app.env"
+  echo "  APP_SECRET generated into app.env (mode 600) — it signs the /login cookie"
+fi
+chmod 600 "$APP_DIR/app.env"
 
 # Prove the file the service will read yields the expected users, using the app's own
 # loader (imported, not re-implemented) so a format change cannot pass unnoticed.
@@ -220,6 +255,7 @@ for item in raw.split(","):
     if name:
         print(f"    {name}: uid={uid or '(none — recorded by name)'} "
               f"password={'set' if pw else 'MISSING'}")
+print(f"  APP_SECRET: {'set' if os.environ.get('APP_SECRET') else 'MISSING — app.py will refuse to start'}")
 PYCHECK
 
 if [ "$CONFIG_ONLY" -eq 1 ]; then
@@ -321,8 +357,20 @@ case "$health" in
   ok*) echo "  app  :200 $health" ;;
   *)   die "app is up but /healthz says: ${health:-<no response>} — check CXAPP_DB_* in $APP_DIR/app.env" ;;
 esac
-printf '  auth gate via nginx: %s (401 = login required, correct)\n' \
-  "$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Host: philip.amzmanager.net' http://127.0.0.1/ || true)"
+# The gate is now a 302 to /login, not a 401: a 401 would make the browser open its
+# grey Basic dialog, which is exactly what the sign-in page replaced. Check it, so a
+# deploy that silently reverts to Basic (or leaves / unauthenticated) fails loudly.
+gate_code="$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Host: philip.amzmanager.net' http://127.0.0.1/ || true)"
+gate_loc="$(curl -s -o /dev/null -D - -m 10 -H 'Host: philip.amzmanager.net' http://127.0.0.1/ 2>/dev/null | tr -d '\r' | sed -n 's/^[Ll]ocation: //p' | head -1 || true)"
+case "$gate_code" in
+  302) case "$gate_loc" in
+         */login*) echo "  sign-in gate: 302 -> $gate_loc (correct)" ;;
+         *) echo "  !! / returned 302 but not to /login ($gate_loc)" >&2 ;;
+       esac ;;
+  *) echo "  !! / returned $gate_code, expected 302 to /login — check the service and nginx" >&2 ;;
+esac
+login_code="$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Host: philip.amzmanager.net' http://127.0.0.1/login || true)"
+echo "  GET /login: $login_code (200 = the form is being served)"
 echo
 echo "done. From the outside: https://philip.amzmanager.net/"
 echo "logs: journalctl -u ai-complaints -f   |   tail -f /var/log/nginx/ai-complaints.access.log"

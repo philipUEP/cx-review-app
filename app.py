@@ -31,17 +31,25 @@ Routes
                     pre-selected when one was prescribed)
   /quality          the weekly 45-row random check: record a call per row
   /export.csv       the current filter as CSV (?text=1 adds the review text)
+  /login            branded sign-in form (email + password), sets a signed cookie
+  /logout           clears the session cookie
   /healthz          unauthenticated liveness probe for the deploy script
 
 Product identity (product / parent / sku / asin / title) is enriched into
 `classifications` by enrich_products.py on the refresh host, straight from
 amzmanager.all_products. This app never connects to the source database.
 
-Auth: HTTP Basic. APP_USERS="user:uid:password,..." is the real list, so every
-decision is stamped with the person who made it; APP_USER/APP_PASS/APP_REVIEWER_UID
-is the single-user form the first deployment used. TLS is terminated by the
-reverse proxy in front of the box, so the credentials are never on the wire in
-clear text.
+Auth: a branded sign-in page at /login (email + password), not HTTP Basic — the
+browser's grey Basic dialog was the complaint. A successful POST sets a signed,
+HttpOnly session cookie (HMAC-SHA256 over 'username|expiry', keyed on APP_SECRET,
+12 hours) so no password is ever stored client-side. APP_USERS="user:uid:password,..."
+is the real list, so every decision is stamped with the person who made it;
+APP_USER/APP_PASS/APP_REVIEWER_UID is the single-user form the first deployment
+used. The Email field also accepts a full address: the part before '@' is the
+username, so chadia@upperechelonproducts.com signs in as chadia. TLS is terminated
+by the reverse proxy in front of the box, and X-Forwarded-Proto decides whether
+the cookie carries Secure. APP_SECRET has no default: without it the app refuses
+to start, because a default key would let anyone forge a session.
 
 This file is deployed on its own (deploy_on_box.sh installs exactly app.py into
 /opt/ai-complaints/app), so it stays a single file: dependency-light, stdlib WSGI
@@ -49,6 +57,8 @@ This file is deployed on its own (deploy_on_box.sh installs exactly app.py into
 """
 import base64
 import csv
+import hashlib
+import hmac
 import io
 import math
 import os
@@ -56,6 +66,7 @@ import random
 import re
 import secrets
 import sys
+import time
 import urllib.parse
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -99,6 +110,12 @@ APP_PASS = next((u["pw"] for u in USERS.values() if u["pw"]), "")
 # Kept for the one-user configuration: the uid every write is stamped with when
 # the signed-in account has none of its own.
 DEFAULT_UID = next((u["uid"] for u in USERS.values() if u["uid"]), None)
+# Sessions. APP_SECRET is deliberately NOT defaulted: a built-in key would let
+# anyone who has read this file mint a valid cookie for any username. The app
+# refuses to start without one (see __main__); deploy_on_box.sh generates it.
+APP_SECRET = os.environ.get("APP_SECRET", "").strip()
+SESSION_COOKIE = "cx_session"
+SESSION_HOURS = 12
 SAMPLE_N = int(os.environ.get("APP_SAMPLE_N", "45"))
 # F9: the weekly sample is drawn from rows with a customer comment from this ISO
 # week on. Earlier weeks already have a persisted sample and are not re-drawn;
@@ -211,6 +228,8 @@ td.num,th.num{text-align:right}
 .txtog a.on{color:var(--ink);font-weight:650;border-bottom:1px solid var(--ink)}
 .mixpanel .cap{color:var(--mut);font-size:12px;margin-top:6px}
 .who{color:var(--mut);font-size:12px;margin-left:auto}
+.who a{margin-left:12px;color:var(--mut);font-weight:600;border-bottom:1px solid var(--line)}
+.who a:hover{color:var(--ink);text-decoration:none;border-bottom-color:var(--ink)}
 .decision{background:#fafafc;border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:12px;font-size:13px}
 .decision b{font-weight:650}
 """
@@ -258,7 +277,8 @@ def page(title, body, active="", msg="", err=False, ctx=None):
                      ("/rules", "Rules"), ("/codes", "New codes"), ("/quality", "Quality")])
     flash = f'<div class="flash{" err" if err else ""}">{esc(msg)}</div>' if msg else ""
     who_html = (f'<span class="who">signed in as <b>{esc(who["name"])}</b>'
-                f'{" (uid " + str(who["uid"]) + ")" if who.get("uid") else ""}</span>') if who else ""
+                f'{" (uid " + str(who["uid"]) + ")" if who.get("uid") else ""}'
+                f'<a href="/logout">Sign out</a></span>') if who else ""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · AI Complaint Validation</title><style>{CSS}</style></head>
@@ -2988,7 +3008,172 @@ def export_csv(cur, q):
             f"attachment; filename=complaint-records-{date.today().isoformat()}.csv")
 
 
-# ---------------------------------------------------------------- dispatch
+# ---------------------------------------------------------------- sign-in
+
+LOGIN_CSS = """
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:#f1f2f4;color:#1f2430;
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
+.wordmark{display:flex;align-items:center;gap:11px;padding:26px 32px}
+.wordmark .uep{font-size:27px;font-weight:800;letter-spacing:-.02em;color:#12386b}
+.wordmark .sep{width:1px;height:23px;background:#d2d6dd}
+.wordmark .full{font-size:10px;font-weight:650;letter-spacing:.15em;text-transform:uppercase;color:#7a8393}
+.wrap{display:flex;justify-content:center;padding:6vh 18px 60px}
+.card{background:#fff;border:1px solid #e2e5ea;border-radius:10px;width:100%;max-width:420px;
+  padding:30px 32px 26px;box-shadow:0 1px 2px rgba(16,24,40,.04),0 14px 34px rgba(16,24,40,.07)}
+.card h1{margin:0 0 20px;font-size:23px;font-weight:700;letter-spacing:-.01em;color:#1f2430}
+.field{margin-bottom:16px}
+.field label{display:block;font-size:12.5px;font-weight:600;color:#3c4453;margin-bottom:6px}
+.field input{width:100%;padding:10px 12px;border:1px solid #d4d8df;border-radius:6px;background:#fff;
+  color:#1f2430;font:inherit;font-size:14.5px}
+.field input:focus{outline:none;border-color:#1a56db;box-shadow:0 0 0 3px rgba(26,86,219,.13)}
+.err{background:#fdf2f2;border:1px solid #f4c1bf;color:#a3221b;border-radius:6px;
+  padding:9px 12px;font-size:13px;margin-bottom:16px}
+.actions{display:flex;justify-content:flex-end;margin-top:22px}
+button.login{background:#1a56db;border:1px solid #1a56db;color:#fff;font:inherit;font-weight:600;
+  padding:10px 30px;border-radius:6px;cursor:pointer}
+button.login:hover{background:#1748b6}
+@media(max-width:520px){
+  .wordmark{padding:18px}.wordmark .uep{font-size:21px}.wordmark .full{font-size:9px}
+  .wrap{padding:2vh 14px 40px}.card{padding:24px 20px}
+}
+"""
+
+LOGIN_ERROR = "That email and password do not match our records"
+
+
+def login_page(error="", email="", next_path="/"):
+    """The sign-in card. Self-contained CSS, no JS, no external assets — it is the
+    first thing a user sees, so it must not depend on the app's data or CDN."""
+    err = f'<div class="err" role="alert">{esc(error)}</div>' if error else ""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login · AI Complaint Validation</title><style>{LOGIN_CSS}</style></head>
+<body>
+<div class="wordmark"><span class="uep">UEP</span><span class="sep"></span>
+<span class="full">Upper Echelon Products</span></div>
+<div class="wrap"><div class="card">
+<h1>Login</h1>
+{err}
+<form method="post" action="/login" novalidate>
+<input type="hidden" name="next" value="{esc(next_path)}">
+<div class="field"><label for="email">Email</label>
+<input id="email" name="email" type="email" inputmode="email" autocomplete="username"
+       spellcheck="false" value="{esc(email)}" autofocus required></div>
+<div class="field"><label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required></div>
+<div class="actions"><button class="login" type="submit">Login</button></div>
+</form>
+</div></div></body></html>"""
+
+
+def _b64e(raw):
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64d(txt):
+    return base64.urlsafe_b64decode(txt + "=" * (-len(txt) % 4))
+
+
+def sign_session(username):
+    """'<payload>.<hmac>' where payload is base64url('name|exp_unix').
+
+    The username is the only identity in the cookie; the password is never in it,
+    and the HMAC makes the pair unforgeable without APP_SECRET.
+    """
+    if not APP_SECRET:
+        raise RuntimeError("APP_SECRET is not set — cannot sign a session")
+    exp = int(time.time()) + SESSION_HOURS * 3600
+    payload = _b64e(f"{username}|{exp}".encode("utf-8"))
+    sig = hmac.new(APP_SECRET.encode("utf-8"), payload.encode("ascii"),
+                   hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def verify_session(token):
+    """-> username, or None if the signature is wrong, the cookie is malformed or
+    the 12 hours are up. Never raises: a broken cookie is just 'not signed in'."""
+    if not token or not APP_SECRET or "." not in token:
+        return None
+    payload, _, sig = token.rpartition(".")
+    want = hmac.new(APP_SECRET.encode("utf-8"), payload.encode("ascii", "ignore"),
+                    hashlib.sha256).hexdigest()
+    if not secrets.compare_digest(sig, want):
+        return None
+    try:
+        name, _, exp = _b64d(payload).decode("utf-8").rpartition("|")
+        if int(exp) < int(time.time()):
+            return None
+    except Exception:                                          # noqa: BLE001
+        return None
+    return name or None
+
+
+def cookie_value(environ, name):
+    for part in (environ.get("HTTP_COOKIE") or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == name:
+            return urllib.parse.unquote(v.strip())
+    return ""
+
+
+def secure_request(environ):
+    """The proxy terminates TLS, so wsgi.url_scheme is http here; the only honest
+    signal is X-Forwarded-Proto. Secure is set when (and only when) that says https."""
+    proto = (environ.get("HTTP_X_FORWARDED_PROTO") or "").split(",")[0].strip().lower()
+    return proto == "https" or environ.get("wsgi.url_scheme") == "https"
+
+
+def safe_next(target, default="/"):
+    """Same-origin paths only. '//evil.com' is a protocol-relative ABSOLUTE url, so
+    'starts with /' is not enough — it must start with exactly one '/'."""
+    t = (target or "").strip()
+    if (not t.startswith("/") or t.startswith("//") or "\\" in t
+            or "\r" in t or "\n" in t):
+        return default
+    # Never bounce straight into the auth endpoints themselves: next=/logout would
+    # sign the user out the instant they signed in.
+    if t in ("/login", "/logout") or t.startswith("/login?") or t.startswith("/logout?"):
+        return default
+    return t
+
+
+def check_login(identifier, password):
+    """-> the user dict, or None. The Email field takes a username OR an address:
+    the part before '@' is the username (chadia@… signs in as chadia)."""
+    ident = (identifier or "").strip()
+    if not ident or not password:
+        return None
+    local = ident.split("@", 1)[0].strip()
+    rec = USERS.get(local)
+    if rec is None:
+        low = local.lower()
+        rec = next((u for n, u in USERS.items() if n.lower() == low), None)
+    if not rec or not rec.get("pw"):
+        return None
+    if not secrets.compare_digest(password.encode("utf-8"), rec["pw"].encode("utf-8")):
+        return None
+    return rec
+
+
+def start_session(start, username, next_path, secure):
+    cookie = (f"{SESSION_COOKIE}={sign_session(username)}; Path=/; "
+              f"Max-Age={SESSION_HOURS * 3600}; HttpOnly; SameSite=Lax")
+    if secure:
+        cookie += "; Secure"
+    start("302 Found", [("Location", next_path), ("Set-Cookie", cookie),
+                        ("Cache-Control", "no-store"), ("Content-Length", "0")])
+    return [b""]
+
+
+def end_session(start, secure):
+    cookie = (f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+    if secure:
+        cookie += "; Secure"
+    start("302 Found", [("Location", "/login"), ("Set-Cookie", cookie),
+                        ("Cache-Control", "no-store"), ("Content-Length", "0")])
+    return [b""]
+
 
 def auth_user(environ):
     """The signed-in user as {pw, uid, name}, or None.
@@ -2996,17 +3181,23 @@ def auth_user(environ):
     Returning the person (not a boolean) is the whole point: every write stamps
     reviewed_by from this dict, so the audit trail names whoever actually decided.
     """
+    rec = USERS.get(verify_session(cookie_value(environ, SESSION_COOKIE)) or "")
+    if rec:
+        return rec
+    # Automation fallback (scripts, uptime checks): accept Basic, but NEVER
+    # advertise it — no WWW-Authenticate — so a browser never opens its grey
+    # dialog. People sign in at /login.
     auth = environ.get("HTTP_AUTHORIZATION", "")
-    if not auth.startswith("Basic "):
-        return None
-    try:
-        u, _, p = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
-    except Exception:                                          # noqa: BLE001
-        return None
-    rec = USERS.get(u)
-    if not rec or not rec["pw"] or not secrets.compare_digest(p, rec["pw"]):
-        return None
-    return rec
+    if auth.startswith("Basic ") and cookie_value(environ, SESSION_COOKIE) == "":
+        try:
+            u, _, p = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+        except Exception:                                      # noqa: BLE001
+            return None
+        rec = USERS.get(u)
+        if rec and rec["pw"] and secrets.compare_digest(p.encode("utf-8"),
+                                                        rec["pw"].encode("utf-8")):
+            return rec
+    return None
 
 
 def app(environ, start_response):
@@ -3024,12 +3215,46 @@ def app(environ, start_response):
         start_response(code, [("Content-Type", "text/plain; charset=utf-8")])
         return [body]
 
+    secure = secure_request(environ)
+
+    if path == "/logout":
+        return end_session(start_response, secure)
+
+    if path == "/login":
+        qs_next = safe_next(parse_qs(environ).get("next", "/"))
+        if method == "POST":
+            f = parse_form(environ)
+            nxt = safe_next(f.get("next"), qs_next)
+            ident = (f.get("email") or "").strip()
+            rec = check_login(ident, f.get("password") or "")
+            if rec:
+                return start_session(start_response, rec["name"], nxt, secure)
+            # 401 with the card re-rendered in place: no redirect, so a mistyped
+            # password cannot bounce the user through a loop.
+            body = login_page(LOGIN_ERROR, ident, nxt).encode("utf-8")
+            start_response("401 Unauthorized",
+                           [("Content-Type", "text/html; charset=utf-8"),
+                            ("Cache-Control", "no-store"),
+                            ("Content-Length", str(len(body)))])
+            return [body]
+        who = auth_user(environ)
+        if who:                       # already signed in: no reason to show the form
+            nxt = safe_next(parse_qs(environ).get("next", "/"))
+            start_response("302 Found", [("Location", nxt), ("Content-Length", "0")])
+            return [b""]
+        body = login_page("", "", qs_next).encode("utf-8")
+        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8"),
+                                  ("Cache-Control", "no-store"),
+                                  ("Content-Length", str(len(body)))])
+        return [body]
+
     who = auth_user(environ)
     if not who:
-        start_response("401 Unauthorized",
-                       [("WWW-Authenticate", 'Basic realm="AI Complaint Validation"'),
-                        ("Content-Type", "text/plain; charset=utf-8")])
-        return [b"Authentication required"]
+        target = path + (("?" + environ["QUERY_STRING"]) if environ.get("QUERY_STRING") else "")
+        start_response("302 Found",
+                       [("Location", "/login?next=" + urllib.parse.quote(target, safe="")),
+                        ("Cache-Control", "no-store"), ("Content-Length", "0")])
+        return [b""]
 
     q = parse_qs(environ)
     msg, err = q.get("msg", ""), q.get("err") == "1"
@@ -3129,8 +3354,20 @@ class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
 if __name__ == "__main__":
     if not any(u["pw"] for u in USERS.values()):
         sys.exit("APP_PASS not set — refusing to serve without a password")
+    # No default key, ever: a built-in APP_SECRET would let anyone who can read
+    # this file forge a session for any username. Fail before binding the port.
+    if not APP_SECRET:
+        sys.exit("APP_SECRET is not set — refusing to serve: sessions cannot be signed "
+                 "without it.\n  Generate one with:  openssl rand -hex 32\n"
+                 "  Add the resulting value to app.env as a line starting APP_SECRET= ,\n"
+                 "  mode 600, readable by the service user. deploy_on_box.sh writes it on a\n"
+                 "  fresh install and backfills it on re-run.")
+    if len(APP_SECRET) < 16:
+        sys.exit("APP_SECRET is too short (<16 chars) — it signs every session cookie.\n"
+                 "  Generate one with: openssl rand -hex 32")
     port = int(os.environ.get("APP_PORT", "8080"))
     host = os.environ.get("APP_HOST", "127.0.0.1")
     print(f"serving on {host}:{port} as {', '.join(sorted(USERS))} "
-          f"(threaded, statement timeout {os.environ.get('APP_STMT_TIMEOUT', '30')}s)")
+          f"(cookie sessions, {SESSION_HOURS}h, threaded, statement timeout "
+          f"{os.environ.get('APP_STMT_TIMEOUT', '30')}s)")
     make_server(host, port, app, server_class=ThreadingWSGIServer).serve_forever()
