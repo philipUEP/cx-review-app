@@ -631,12 +631,14 @@ def vocab_upsert(code, category):
 # ---------------------------------------------------------------- complaint mix
 # What this panel may and may not say (sixth review: F1, F3, F5, F12, F13).
 #
-#  * THERE IS NO ORDERS/UNITS DENOMINATOR IN THIS DATABASE (12 tables, none of
-#    them sales), so no number here is a RETURN RATE. A rise in complaint records
-#    can be a launch, a promotion or a quality problem, and the page says so in
-#    one line. Share of the mix is the headline because it needs no denominator
-#    at all; "an increased amount of returns" cannot be answered from here, only
-#    "more complaint records arrived".
+#  * A DENOMINATOR NOW EXISTS, AND IT IS THE SELLER'S OWN SALES. Since 2026-10-19
+#    `sales_by_sku_month` (sku x month, built by build_sales.py from
+#    amzmanager.finance_by_products) carries units/orders/refunds per SKU-month, and
+#    v_complaint_rates turns it into complaints per 100 orders. So the panel states
+#    the EXPOSURE behind the filtered records and the rate when the join covers
+#    them. It still cannot call a rise a "return rate": the numerator is complaint
+#    RECORDS, and a launch or a promotion moves both sides. When no sales row
+#    covers the filter the line says exactly that — never a blank, never a 0.
 #
 #  * THE CHANGE COLUMN COMPARES RECORDS PER FEED DAY ACROSS WINDOWS OF DIFFERENT
 #    FEED COMPOSITION. ncx holds 3,433 records in the prior window and none after
@@ -969,13 +971,119 @@ def _mix_svg(points, partial_day=None):
             f'style="width:100%;height:auto;display:block">{grid}{lab}{area}{line}{dots}{labels}</svg>')
 
 
-def mix_block(cur, q, n):
-    """The complaint mix for the current filter: share first, then change.
+def exposure(cur, q, monthly=False):
+    """Orders/units behind the records THIS filter selects — the denominator.
 
-    SHARE IS THE HEADLINE (F5). No orders/units denominator exists in this
-    database, so a count of complaint records cannot become a return rate; the
-    one denominator-free number is the share of the mix, and that is what the
-    panel leads with.
+    Grouping the filtered records to (sku, month) and joining the sales table on
+    that pair is deliberate: a filter for one complaint code then divides by the
+    orders that could have produced that code, not by the whole catalogue's sales.
+    The numerator and the denominator therefore always describe the same
+    SKU-months, and the fraction of records without a sales row is measured
+    (`recs` vs `recs_cov`) instead of being assumed away.
+
+    `monthly=True` reads the month-grain rollup (for /monthly, whose from/to are
+    months, not dates); the default reads the record grain (for /reviews, where
+    the filter is a day range and the records are what the panel shows).
+
+    Every value is NULL-safe: SUM() over a LEFT JOIN with no match returns NULL,
+    and callers must treat that as "no exposure", never as zero orders.
+    """
+    if monthly:
+        w, args = build_where_monthly(q)
+        src = (f"SELECT sku, month AS m, SUM(n_complaints) n "
+               f"FROM v_complaint_rates {w} GROUP BY sku, month")
+    else:
+        w, args = build_where(q)
+        # The numerator is COMPLAINT RECORDS, the same set v_ai_complaints_monthly
+        # counts: a resolved complaint, not 'Review Deletion', not an unusable
+        # category. Without this clause /reviews rated 472 records against the 468
+        # /monthly shows for the same filter, and the two pages disagreed on the
+        # rate for identical filters.
+        wx = (w + " AND " if w else "WHERE ") + (
+            "v.sku IS NOT NULL AND v.review_date IS NOT NULL "
+            "AND v.final_complaint IS NOT NULL AND v.final_complaint <> %s "
+            "AND (v.final_category IS NULL OR v.final_category NOT IN ('NEW','NO_TEXT','ERR'))")
+        args = args + [PROCESS_NOISE]
+        src = (f"SELECT v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n "
+               f"FROM v_ai_complaints v {wx} "
+               f"GROUP BY v.sku, DATE_FORMAT(v.review_date,'%%Y-%%m')")
+    cur.execute(f"""SELECT COUNT(*) pairs,
+                           SUM(s.sku IS NOT NULL) covered_pairs,
+                           SUM(x.n) recs,
+                           SUM(CASE WHEN s.sku IS NOT NULL THEN x.n ELSE 0 END) recs_cov,
+                           SUM(s.orders) orders, SUM(s.units) units,
+                           SUM(s.refunds) refunds,
+                           SUM(CASE WHEN s.sku IS NOT NULL AND s.orders = 0
+                                    THEN 1 ELSE 0 END) zero_months
+                      FROM ({src}) x
+                      LEFT JOIN sales_by_sku_month s
+                             ON s.sku = x.sku AND s.month = x.m""", args)
+    return cur.fetchone()
+
+
+def exposure_line(cur, q, monthly=False):
+    """One line: the exposure for the filtered set and the rate, or why there is none.
+
+    Never blank and never a zero when the truth is "unknown": a filter the sales
+    feed does not cover says so in words, because 0.00 complaints per order and
+    "no orders to divide by" are different statements and only one of them is true.
+    """
+    e = exposure(cur, q, monthly=monthly)
+    recs = int(e["recs"] or 0)
+    if not recs:
+        return ""
+    pairs = int(e["pairs"] or 0)
+    covered = int(e["covered_pairs"] or 0)
+    recs_cov = int(e["recs_cov"] or 0)
+    if not covered:
+        return ('<p class="mixnote"><b>Sales exposure:</b> no sales data covers this filter '
+                f'({pairs:,} SKU-month{"s" if pairs != 1 else ""} in these records, none of them '
+                'in <code>sales_by_sku_month</code>), so there is no complaints-per-100-orders '
+                'for it. The counts and shares above are unaffected — they need no denominator.'
+                '</p>')
+    if not e["orders"]:
+        return ('<p class="mixnote"><b>Sales exposure:</b> '
+                f'{covered:,} SKU-month{"s" if covered != 1 else ""} in these records '
+                f'{"have" if covered != 1 else "has"} a sales row but <b>0 orders</b>, so the '
+                f'rate is undefined — there is nothing to divide these {recs_cov:,} complaint '
+                'records by. It is not 0.00: that would claim no complaints per order, which '
+                'this data cannot support.</p>')
+    orders, units = int(e["orders"]), int(e["units"] or 0)
+    rate = 100.0 * recs_cov / orders
+    bits = [f'<b>Sales exposure:</b> {orders:,} orders and {units:,} units across '
+            f'{covered:,} SKU-month{"s" if covered != 1 else ""} — '
+            f'<b>{rate:.2f}</b> complaint records per 100 orders']
+    if units:
+        bits.append(f'({1000.0 * recs_cov / units:.2f} per 1,000 units)')
+    cov_pct = 100.0 * recs_cov / recs
+    if covered < pairs:
+        bits.append(f'. The sales feed covers {cov_pct:.1f}% of these {recs:,} records; '
+                    f'{pairs - covered:,} SKU-month{"s" if pairs - covered != 1 else ""} '
+                    f'({recs - recs_cov:,} records) have no sales row and are not in the rate')
+    else:
+        bits.append(f'. Every SKU-month in this selection has a sales row ({cov_pct:.1f}% of '
+                    f'these {recs:,} records)')
+    zero = int(e["zero_months"] or 0)
+    if zero:
+        bits.append(f'; {zero:,} of them sold 0 orders, where the rate is undefined (shown as '
+                    f'“—”, never 0)')
+    bits.append('. Orders/units are the seller\'s own finance feed for the same SKU-month, '
+                'all marketplaces; the complaint side is review records, so this is a record '
+                'rate, not a return rate.')
+    return '<p class="mixnote">' + " ".join(bits).replace(" .", ".") + '</p>'
+
+
+def mix_block(cur, q, n):
+    """The complaint mix for the current filter: share first, then change, then exposure.
+
+    SHARE IS THE HEADLINE (F5). Share of the mix needs no denominator at all, so
+    it is the one comparison a feed change cannot fake; that is why it leads.
+
+    EXPOSURE IS THE SECOND STATEMENT (2026-10-19). The counts here are complaint
+    RECORDS; the seller's finance feed now supplies orders/units for the same
+    SKU-months, so the panel prints the exposure behind the filtered set and the
+    records per 100 orders when that join covers it. It says "no sales data covers
+    this filter" when it does not, and never prints 0.
 
     The change column is a change in RECORDS PER FEED DAY across the feeds that
     cover BOTH windows (F1) — never a change in raw totals, which move when a
@@ -1347,6 +1455,8 @@ def mix_block(cur, q, n):
            + (' · no earlier records here, so there is nothing to compare'
               if (f and t and not prior_all_n) else ''))
 
+    exp_line = exposure_line(cur, q)
+
     return f"""<div class="mix" data-n="{n}" data-cur-feed="{cur_feed}" data-prior-feed="{prior_feed}" data-cur-sel="{cur_sel}" data-prior-sel="{prior_sel}" data-lfl="{esc(",".join(lfl))}" data-guard="{1 if reasons else 0}">
   <div class="mixhead"><h2>Complaint mix</h2>
     <span class="r">{n:,} complaint records match these filters{when}</span></div>
@@ -1368,9 +1478,10 @@ def mix_block(cur, q, n):
   complaint · {noise:,} are process noise (Review Deletion) shown for reconciliation only and kept out of the
   distribution.{riser}{caveat}</p>
   <p class="mixnote">{disc}.{val}.{dupnote}</p>
-  <p class="mixnote"><b>No units or orders denominator exists in this database</b> (10 tables, none of them
-  sales), so a rise here is a rise in <b>complaint records</b>, not in the return rate: a launch, a promotion
-  and a quality problem all look the same from this side.</p>
+  {exp_line}
+  <p class="mixnote">A rise in this panel is a rise in <b>complaint records</b>: a launch, a promotion
+  and a quality problem all move it, and only the exposure line above can say whether it moved
+  faster than the orders did.</p>
 </div>"""
 
 
@@ -1712,7 +1823,10 @@ def do_review(cur, rid, f, who):
 PAGE_ROLLUP = 200
 MONTHLY_COLS = ["month", "quarter", "product_family", "product", "parent", "sku", "asin", "title",
                 "title_short", "complaint", "complaint_display", "category", "n",
-                "pct_of_sku_month", "n_human_validated", "n_repeat"]
+                "pct_of_sku_month", "n_human_validated", "n_repeat",
+                # Exposure, appended rather than inserted: every existing column keeps
+                # its position, so a saved CSV and a fresh one still line up by index.
+                "orders", "units", "complaints_per_100_orders", "complaints_per_1000_units"]
 
 
 def month_grain(v):
@@ -1794,7 +1908,7 @@ def build_where_monthly(q):
 def p_monthly(cur, q, msg="", ctx=None):
     w, args = build_where_monthly(q)
     cur.execute(f"""SELECT COUNT(*) c, COALESCE(SUM(n_repeat),0) r
-                      FROM v_ai_complaints_monthly {w}""", args)
+                      FROM v_complaint_rates {w}""", args)
     hh = cur.fetchone()
     n, n_rep = int(hh["c"]), int(hh["r"])
     try:
@@ -1804,13 +1918,36 @@ def p_monthly(cur, q, msg="", ctx=None):
     pages = max(1, (n + PAGE_ROLLUP - 1) // PAGE_ROLLUP)
     pg = min(pg, pages)
     off = (pg - 1) * PAGE_ROLLUP
+    # v_complaint_rates is v_ai_complaints_monthly LEFT JOINed on
+    # sales_by_sku_month (sku, month). The complaint counts are the same numbers —
+    # apply_views asserts both the row count and SUM(n) are identical — and the
+    # exposure columns are additive: nothing already on this page changed.
     cur.execute(f"""SELECT month, quarter, product_family, product, parent, sku, asin,
-                           complaint, category, n, pct_of_sku_month, n_human_validated, n_repeat,
+                           complaint, category, n_complaints, pct_of_sku_month,
+                           n_human_validated, n_repeat,
+                           orders, units, refunds, has_sales,
+                           complaints_per_100_orders, complaints_per_1000_units,
                            LEFT(COALESCE(title,''),70) title, title_short
-                      FROM v_ai_complaints_monthly {w}
-                     ORDER BY month DESC, n DESC, sku, complaint
+                      FROM v_complaint_rates {w}
+                     ORDER BY month DESC, n_complaints DESC, sku, complaint
                      LIMIT {PAGE_ROLLUP} OFFSET {off}""", args)
     rows = cur.fetchall()
+
+    def _rate(v, has, why):
+        """An undefined rate is "—" with the reason in the tooltip — never 0.00.
+
+        NULL from the view means either "no sales row for this SKU-month" or "that
+        SKU-month sold 0 orders". Both make the ratio undefined, and 0.00 would
+        read as "no complaints per order", which is a different and false claim.
+        """
+        if v is None:
+            return f'<td class="mono num" title="{esc(why)}">—</td>'
+        return f'<td class="mono num">{float(v):,.2f}</td>'
+
+    def _num(v, why="no sales row for this SKU-month"):
+        return (f'<td class="mono num">{int(v):,}</td>' if v is not None
+                else f'<td class="mono num" title="{esc(why)}">—</td>')
+
     trs = "".join(
         f"""<tr><td class="mono">{esc(r["month"])}</td>
         <td>{esc(r["product"] or "—")}<div class="title">{esc(r["title"] or "")}</div></td>
@@ -1818,9 +1955,17 @@ def p_monthly(cur, q, msg="", ctx=None):
         <td class="mono">{esc(r["parent"] or "—")}</td>
         <td>{amz_sku(r["sku"])}{f'<div class="title">{esc(r["title_short"])}</div>' if r["title_short"] else ""}</td>
         <td>{esc(display_label(r["complaint"]))}</td><td class="meta">{esc(r["category"] or "")}</td>
-        <td class="mono num">{r["n"]:,}</td><td class="mono num">{r["pct_of_sku_month"]}%</td>
+        <td class="mono num">{r["n_complaints"]:,}</td><td class="mono num">{r["pct_of_sku_month"]}%</td>
         <td class="mono num">{int(r["n_human_validated"] or 0):,}</td>
-        <td class="mono num">{int(r["n_repeat"] or 0):,}</td></tr>""" for r in rows)
+        <td class="mono num">{int(r["n_repeat"] or 0):,}</td>
+        {_num(r["orders"])}{_num(r["units"])}
+        {_rate(r["complaints_per_100_orders"], r["has_sales"],
+               "no sales row for this SKU-month" if not r["has_sales"]
+               else "0 orders in this SKU-month: the rate is undefined, not zero")}
+        {_rate(r["complaints_per_1000_units"], r["has_sales"],
+               "no sales row for this SKU-month" if not r["has_sales"]
+               else "0 units in this SKU-month: the rate is undefined, not zero")}
+        </tr>""" for r in rows)
 
     months = options(cur, """SELECT month k, SUM(n) n FROM v_ai_complaints_monthly
                               WHERE month IS NOT NULL GROUP BY month ORDER BY month DESC""")
@@ -1829,13 +1974,16 @@ def p_monthly(cur, q, msg="", ctx=None):
     complaints = options(cur, "SELECT complaint k, SUM(n) n FROM v_ai_complaints_monthly GROUP BY complaint ORDER BY n DESC")
     complaint_sql = select('complaint', [(k, display_label(k), v) for k, v in complaints], q.get("complaint") or "")
     mf, mt = month_grain(q.get("from")), month_grain(q.get("to"))
+    exp_line = exposure_line(cur, q, monthly=True)
     grain_note = ""
     if mf or mt:
         grain_note = (f' <b>Months {mf or "first"} to {mt or "last"}</b> — this page is month grain, so a date '
                       f'like the 14th means that whole month (the Complaint records link above carries month=).')
     body = f"""<h1>Monthly</h1>
 <p class="sub">The grain the team reports on: SKU × month × complaint, with the share of that SKU-month and how
-many rows a human validated. {n:,} rows match{'' if n == 1 else ''} · page {pg} of {pages}
+many rows a human validated. <b>Orders, units and the two rate columns come from the seller's own finance
+feed for the same SKU-month</b> (all marketplaces); a row with no sales row, or with zero orders, shows
+“—” because the rate is undefined there — never 0. {n:,} rows match{'' if n == 1 else ''} · page {pg} of {pages}
 (rows {off + 1:,}–{off + len(rows):,}) · <a href="/monthly.csv?{esc(qstr(q))}">export CSV</a>.
 Process noise (Review Deletion) and unclassified categories are not in this rollup; the record-grain rows
 behind any filter are on <a href="{esc(reviews_url_for_month(q))}">Complaint records</a>,
@@ -1860,10 +2008,13 @@ and <code>dup_rank</code>.)</p>
   <div><button class="primary">Filter</button></div>
   <div><a href="/monthly">clear</a></div>
 </form>
+{exp_line}
 <div class="card"><table><thead><tr><th>Month</th><th>Product</th><th>Family</th><th>Parent</th><th>SKU</th>
 <th>Complaint</th><th>Category</th><th class="num">Records</th><th class="num">% of SKU-month</th>
-<th class="num">Human validated</th><th class="num">Repeats</th></tr></thead>
-<tbody>{trs or '<tr><td colspan="11" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
+<th class="num">Human validated</th><th class="num">Repeats</th>
+<th class="num">Orders</th><th class="num">Units</th>
+<th class="num">per 100 orders</th><th class="num">per 1,000 units</th></tr></thead>
+<tbody>{trs or '<tr><td colspan="15" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
 <div class="pager">{f'<a href="/monthly?{esc(qstr(q, page=pg-1))}">← previous</a>' if pg > 1 else ''}
   <span class="sp">page {pg} of {pages}</span>
   {f'<a href="/monthly?{esc(qstr(q, page=pg+1))}">next →</a>' if pg < pages else ''}</div>"""
@@ -1873,19 +2024,26 @@ and <code>dup_rank</code>.)</p>
 def monthly_csv(cur, q):
     w, args = build_where_monthly(q)
     cur.execute(f"""SELECT month, quarter, product_family, product, parent, sku, asin, title,
-                           title_short, complaint, category, n, pct_of_sku_month, n_human_validated,
-                           n_repeat
-                      FROM v_ai_complaints_monthly {w}
-                     ORDER BY month DESC, n DESC, sku, complaint""", args)
+                           title_short, complaint, category, n_complaints, pct_of_sku_month,
+                           n_human_validated, n_repeat,
+                           orders, units, complaints_per_100_orders, complaints_per_1000_units
+                      FROM v_complaint_rates {w}
+                     ORDER BY month DESC, n_complaints DESC, sku, complaint""", args)
     buf = io.StringIO()
     wtr = csv.writer(buf)
     wtr.writerow(MONTHLY_COLS)
     for r in cur.fetchall():
         row = dict(r)
+        # `n` keeps its old name in the export so a saved CSV and this one still
+        # line up column-for-column; the view calls it n_complaints because the
+        # rate columns made a bare "n" ambiguous.
+        row["n"] = row.pop("n_complaints")
         # The STORED code in `complaint` — the same value /export.csv writes — so
         # the two exports join. The readable label is a separate column, added
         # here and in export_csv, never a rename of one and not the other.
         row["complaint_display"] = display_label(row.get("complaint")) or ""
+        # An undefined rate is written as an EMPTY CSV cell, not 0: a pivot that
+        # averages a fake 0 would report a rate nobody measured.
         wtr.writerow([row.get(c) for c in MONTHLY_COLS])
     return (buf.getvalue().encode("utf-8-sig"), "text/csv",
             f"attachment; filename=complaint-records-monthly-{date.today().isoformat()}.csv")
