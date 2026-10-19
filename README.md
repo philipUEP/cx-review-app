@@ -8,6 +8,33 @@ check. It is the only surface that writes to the `automation_philip` database.
 The Cloudflare Pages site (`uep-ai-complaints.pages.dev`) stays as a read-only
 mirror for anyone who only wants to look.
 
+## Repository layout
+
+```
+app.py                 the review app — the only surface that writes decisions
+deploy_on_box.sh       installs it on ops-automations, nginx on :80 behind the proxy
+pipeline/              everything that produces the numbers (see pipeline/README.md)
+  cx_refresh.sh          the 30-minute chain: classify -> load -> views -> build -> deploy
+  cxvocab.py             the complaint vocabulary and the model prompt
+  apply_views.py         all views + assertions on grain and denominators
+  build_sales.py         joins the read-only replica's finance data for the rate
+  taxonomy/              Chadia's audit files, vendored so a clone works
+tests/                 check_mix_consistency.py, test_sales_rates.py
+POWERBI.md             the PowerBI path for the QC Data Tracker
+.env.example           every setting, no secrets
+```
+
+## Status, honestly
+
+The classifier agrees with Chadia's blind 220-row audit **83.6%** strictly and
+**85.5%** on a same-taxonomy-slot basis (margin ±5 points at n=220). 22,228
+complaint records are classified, and 99.94% of them carry an orders denominator
+from the seller's finance feed.
+
+**No label has been checked by a human yet.** The weekly 45-row sample is the
+mechanism for that, and until two of them exist the honest description of this
+data is "AI-assigned", not "validated".
+
 ## Deploy (two commands, on ops-automations 192.168.1.203)
 
 ```bash

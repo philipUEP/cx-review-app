@@ -351,7 +351,7 @@ The rule, and it applies to every table and chart built from these views:
 | `sales_by_sku_month` rows (SKU × month) | **13,293** |
 | seller SKUs with sales | 564 |
 | finance months covered | 2020-09 → 2026-10 |
-| orders / units / refunds in the table | 15,567,402 / 16,641,609 / 874,102 |
+| orders / units / refunds in the table | 15,568,131 / 16,642,423 / 874,121 |
 | SKU-months with finance rows but 0 orders | 561 (the rate is NULL there) |
 | `v_complaint_rates` rows | 4,527 |
 | of those, with a sales denominator | 4,514 (99.7%) |
