@@ -363,9 +363,29 @@ The rule, and it applies to every table and chart built from these views:
 A rate quoted from `v_complaint_rates` covers **99.94% of the complaint corpus**. The remaining 14 records sit in 13 SKU-months with no finance row; their rate is NULL and must be shown as blank, never 0.
 <!-- sales:end -->
 
-## Phase 2 (not requested yet)
+## Where the data lives
 
-Writing the resolved complaint back into the CX module (`cx_reviews_complaints_rel`
-via the app's own `set categories` action) is unchanged and still blocked on the
-INSERT grant + the 13 missing complaint definitions. Do not ask for both grants in
-one email.
+`automation_philip` on `db01-master` **is the system of record** for this project —
+the classifications, the team's corrections, the approved/denied codes, the weekly
+samples and the views below. Every write goes there; ten scripts write to it.
+
+The legacy `amzmanager` schema is **read-only source data**. Nothing is written
+back to it, and nothing needs to be. The old team screen at
+`/cx/complaints-validation` keeps showing the legacy tables and is not updated by
+this system — the review app replaces it, not feeds it.
+
+### What Hager needs
+
+One thing: **SELECT on `automation_philip`** for whichever account PowerBI connects
+with. Then point the QC Data Tracker at:
+
+- `v_ai_complaints_monthly` — one row per SKU × month × complaint, with the
+  complaint count, its share of that SKU-month, and how many rows a human validated
+- `v_complaint_rates` — the same grain joined to the seller's orders/units/refunds,
+  with `complaints_per_100_orders` and `refund_rate_us_pct`
+- `v_sku_month_rates` — one row per SKU-month, for pivots that must not double-count
+  orders across complaint codes
+
+Read-only is the right ask: it changes no process, and it satisfies Chadia's
+condition in a way an INSERT grant never could.
+
