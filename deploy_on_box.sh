@@ -282,6 +282,14 @@ command -v nginx >/dev/null || {
 # rewrites the Host header, and the stock site is disabled (it served the
 # placeholder root).
 sudo rm -f /etc/nginx/sites-enabled/default
+# A pre-existing site on this box may already claim the same server_name (or
+# default_server for :80) — on 2026-10-19 that was /etc/nginx/sites-enabled/
+# philip.amzmanager.net, and it made `nginx -t` fail with "a duplicate default
+# server". Move any such file aside instead of guessing which block nginx picks.
+for f in $(sudo grep -rlE "server_name[^;]*philip\.amzmanager\.net" /etc/nginx/sites-enabled/ 2>/dev/null | grep -v '/ai-complaints$' || true); do
+  sudo mv "$f" "$f.disabled-$(date -u +%Y%m%dT%H%M%SZ)"
+  echo "  disabled $f — it claimed philip.amzmanager.net (backup kept alongside)"
+done
 sudo tee /etc/nginx/sites-available/ai-complaints >/dev/null <<CONF
 server {
     listen 80 default_server;
