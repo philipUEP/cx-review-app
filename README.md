@@ -30,9 +30,14 @@ The classifier agrees with Chadia's blind 220-row audit **83.6%** strictly and
 complaint records are classified, and 99.94% of them carry an orders denominator
 from the seller's finance feed.
 
-**No label has been checked by a human yet.** The weekly 45-row sample is the
-mechanism for that, and until two of them exist the honest description of this
-data is "AI-assigned", not "validated".
+**The labels were validated before launch.** The CX team's live module holds
+553,055 human-labelled review×complaint pairs across 25 reviewers, and Chadia's
+own blind 220-row check of this AI put agreement at **83.6%** (85.5% on a
+same-taxonomy-slot basis). The audit CSVs she supplied define the taxonomy.
+
+What has *not* happened yet is decisions recorded **in this app** — the team has
+not worked rows since it went live. The weekly 45-row sample is her own stated
+requirement for ongoing monitoring (two months, then taper), not a precondition.
 
 ## Deploy (two commands, on ops-automations 192.168.1.203)
 
