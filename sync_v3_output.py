@@ -36,12 +36,16 @@ DEFAULT_PATH = os.path.join(HERE, "data", "v3_output.csv")
 
 # The header load_to_db.py reads. Order and spelling matter: `date` and `text`
 # are the names it looks up, not review_date / review_text.
+#
+# dup_rank / dup_group are NOT read by load_to_db — they ride along so the CSV
+# discloses the repeats the same way the page and the export do (F6: the file had
+# order_id but no dup_rank, so a reader of the CSV could not see a repeat at all).
 COLS = ["review_id", "product", "parent", "sku", "asin", "order_id", "country",
-        "date", "source", "text", "complaint", "category"]
+        "date", "source", "text", "complaint", "category", "dup_rank", "dup_group"]
 
 SQL = """SELECT review_id, product, parent, sku, asin, order_id, country,
                 DATE_FORMAT(review_date, '%Y-%m-%d') AS date, source,
-                review_text AS text, complaint, category
+                review_text AS text, complaint, category, dup_rank, dup_group
            FROM v_ai_complaints
           ORDER BY review_id"""
 
