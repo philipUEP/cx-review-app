@@ -481,7 +481,7 @@ def page(title, body, active="", msg="", err=False, ctx=None):
                 f'<a href="/logout">Sign out</a></span>') if who else ""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(title)} · AI Complaint Validation</title><style>{CSS}</style></head>
+<title>{esc(title)} · AI Complaint Validation</title><style>{CSS}{ctx.get("css", "")}</style></head>
 <body><header><span class="brand">AI Complaint Validation</span><nav>{nav}</nav>{who_html}</header>
 <main>{ctx.get("banner", "")}{flash}{body}</main>
 {ctx.get("scripts", "")}</body></html>"""
@@ -2072,59 +2072,533 @@ def mix_block(cur, q, n):
 
 
 # ---------------------------------------------------------------- dashboard
+# The overview, not the workspace: four numbers that are doors, the mix, the
+# trend, one rate strip, and a link to the records. Everything that used to be
+# prose on this page (reconciliation, feed coverage, what the rate is, the
+# validation wording) is in the one collapsed disclosure at the bottom.
+#
+# Presentation only: every query below is the one the page already used, or the
+# one /reviews uses for the same figure, so no number can move.
+
+DASH_CSS = """
+.dash h1{font-size:26px;letter-spacing:-.025em;margin:0}
+.dash .dsub{color:#6b7280;font-size:12.5px;margin:5px 0 0}
+.dhead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.dacts{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dbtn{display:inline-block;font-size:12.5px;font-weight:600;padding:6px 12px;border:1px solid #e3e6eb;
+  border-radius:7px;background:#fff;color:#374151;white-space:nowrap}
+.dbtn:hover{border-color:#cfd6e0;text-decoration:none}
+.ro{font-size:10.5px;color:#9ca3af;font-weight:650;text-transform:uppercase;letter-spacing:.06em}
+.dfilters{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin:20px 0 8px}
+.df{display:flex;flex-direction:column;gap:5px;min-width:0}
+.df label{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#9ca3af}
+.df select,.df input{font:inherit;font-size:13px;padding:6px 9px;border:1px solid #dfe3e9;border-radius:7px;
+  background:#fff;color:var(--ink);min-width:0;max-width:100%}
+.df select{min-width:172px}
+.df input{width:172px}
+.df.grow{flex:1 1 180px}
+.df.grow input{width:100%}
+.df select:focus,.df input:focus{outline:2px solid #dbeafe;border-color:#bfd4f7}
+.dapply{padding:6px 14px;font-size:12.5px;border-radius:7px}
+.dclear{font-size:12px;color:#6b7280;padding-bottom:8px}
+.dcards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:20px 0 28px}
+.dcard{display:block;background:var(--card);border:1px solid #e9ebef;border-radius:11px;padding:16px 18px;color:inherit}
+.dcard:hover{border-color:#c7d6f2;text-decoration:none}
+.dcard .n{font-size:25px;font-weight:680;letter-spacing:-.02em;line-height:1.1;font-variant-numeric:tabular-nums}
+.dcard .l{font-size:14px;color:#374151;margin-top:6px;font-weight:600}
+.dcard .s{font-size:12px;color:#9ca3af;margin-top:2px}
+.duo{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:24px;align-items:start;margin-bottom:24px}
+.dpanel{background:var(--card);border:1px solid #e9ebef;border-radius:11px;padding:18px 20px;min-width:0}
+.dphead{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.dphead h2{font-size:20px;margin:0;font-weight:680;letter-spacing:-.02em}
+.dpcount{font-size:12px;color:#6b7280;font-variant-numeric:tabular-nums;white-space:nowrap}
+.drow{display:grid;grid-template-columns:minmax(0,1fr) 58px minmax(40px,34%);align-items:center;gap:12px;
+  padding:7px 0;font:inherit;font-size:14px;border:0;background:none;width:100%;text-align:left;color:inherit}
+.dname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dnum{text-align:right;font-variant-numeric:tabular-nums;color:#374151}
+.dbar{height:8px;background:#f2f4f7;border-radius:4px;overflow:hidden}
+.dbar i{display:block;height:100%;background:#7ba3e8;border-radius:4px}
+.drow.muted .dname{color:#6b7280}
+.drow.muted .dbar i{background:#cdd3dc}
+.drow.more{cursor:pointer;border-radius:8px}
+.drow.more:hover{background:#fafbfd}
+.drow.more .dname{color:#2563eb;font-weight:600}
+.darrow{font-size:10px;color:#9ca3af;margin-left:5px}
+.dall{margin-top:4px;border-top:1px solid #e9ebef;padding-top:6px}
+.dall[hidden]{display:none}
+.dtrend svg{display:block;width:100%;height:auto}
+.dlegend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:12px;font-size:12px;color:#4b5563}
+.dlegend span{display:inline-flex;align-items:center;gap:6px}
+.dlegend .sw{width:10px;height:10px;border-radius:2px;background:#7ba3e8}
+.dlegend .swl{width:18px;height:0;border-top:2px dashed #111827;opacity:.6}
+.dcap{font-size:12px;color:#9ca3af;margin-top:10px;line-height:1.5}
+.dstrip{display:flex;flex-wrap:wrap;align-items:center;gap:4px 9px;background:#fff;border:1px solid #e9ebef;
+  border-radius:11px;padding:12px 18px;margin:0 0 14px;font-size:14px;color:#374151}
+.dstrip b{font-weight:680;font-variant-numeric:tabular-nums;color:var(--ink)}
+.dstrip .sep{color:#d5d9e0}
+.dstrip .end{margin-left:auto;color:#6b7280;font-size:12px;display:inline-flex;gap:9px;flex-wrap:wrap}
+.dopen{display:inline-block;font-size:13px;margin:0 0 28px}
+.dabout{background:#fff;border:1px solid #e9ebef;border-radius:11px;margin-bottom:10px}
+.dabout summary{cursor:pointer;font-size:14px;font-weight:650;padding:14px 20px;display:flex;
+  justify-content:space-between;align-items:center;gap:12px;list-style:none}
+.dabout summary::-webkit-details-marker{display:none}
+.dabout summary span{color:#9ca3af;font-size:12px}
+.dabout .dbody{padding:2px 20px 18px;border-top:1px solid #f1f2f5;max-width:940px}
+.dabout p{margin:12px 0 0;font-size:12.5px;color:#4b5563;line-height:1.6}
+.dabout b{color:#111827}
+.dabout code{font-size:11.5px}
+@media(max-width:960px){.dcards{grid-template-columns:repeat(2,minmax(0,1fr))}.duo{grid-template-columns:1fr}}
+@media(max-width:560px){
+  .dcards{grid-template-columns:1fr}
+  .df{flex:1 1 140px}
+  .df select{min-width:0;width:100%}
+  .df input{width:100%}
+  .dstrip{font-size:13px}
+}
+"""
+
+DASH_MIX_JS = """<script>
+(function(){
+  /* An empty filter is not a filter: disable it on submit so the URL carries only
+     what was actually chosen. */
+  var f=document.querySelector('.dfilters');
+  if(f) f.addEventListener('submit',function(){
+    [].forEach.call(f.elements,function(el){
+      if(el.name && !String(el.value).trim()) el.disabled=true;
+    });
+  });
+  var b=document.getElementById('mixmore'),a=document.getElementById('mixall');
+  if(!b||!a) return;
+  b.addEventListener('click',function(){
+    var open=a.hasAttribute('hidden');
+    if(open){a.removeAttribute('hidden')}else{a.setAttribute('hidden','')}
+    b.setAttribute('aria-expanded',open?'true':'false');
+    var t=b.querySelector('.darrow'); if(t) t.textContent=open?'\\u25be':'\\u25b8';
+  });
+})();
+</script>"""
+
+
+def _dash_day(iso):
+    """2026-08-29 -> '29 Aug 2026'. The caption names a feed's last day."""
+    if not iso:
+        return ""
+    d = iso if isinstance(iso, str) else iso.isoformat()
+    try:
+        return f"{int(d[8:10])} {MN[int(d[5:7]) - 1]} {d[:4]}"
+    except (ValueError, IndexError):
+        return d
+
+
+def _dash_month(m):
+    try:
+        return f"{MN[int(m[5:7]) - 1]} {m[:4]}"
+    except (ValueError, IndexError):
+        return m
+
+
+def _dash_coverage(months, by_src, src_max, omitted):
+    """One line naming the feeds whose coverage stops inside the range."""
+    if len(months) < 2:
+        base = "One month shown."
+    else:
+        last = months[-1]
+        parts = []
+        for s in sorted(by_src):
+            have = [m for m in months if by_src[s].get(m)]
+            if have and have[-1] != last:
+                d = src_max.get(s)
+                parts.append(f"{s} ends {_dash_day(d)}" if d else
+                             f"{s} stops after {_dash_month(have[-1])}")
+        base = ("Coverage changes: " + "; ".join(parts) + "." if parts
+                else "Every source reports in every month shown.")
+    if omitted:
+        base += f" · {omitted:,} older records outside this range are not drawn"
+    return base
+
+
+def _dash_bars_svg(points, rates):
+    """Month bars (left axis) and a dashed per-100-orders line (right axis).
+
+    Server-side SVG, no JS: the dashboard must read with scripting off. A month
+    with no denominator has no point on the line (never a zero) — the polyline
+    breaks there, exactly as /reviews draws it.
+    """
+    if not points:
+        return ""
+    W, H, L, R, T, B = 520, 196, 44, 46, 14, 26
+    iw, ih = W - L - R, H - T - B
+    mx = max(n for _, n in points) or 1
+    live = [rates.get(m) for m, _ in points if rates.get(m) is not None]
+    rmax = max(live) if live else 0
+    rtop = rmax * 1.2 if rmax > 0 else 1
+    step = iw / len(points)
+    bw = min(44, max(6, step * 0.52))
+    g = []
+    for k in range(5):
+        y = T + ih * (1 - k / 4)
+        g.append(f'<line x1="{L}" x2="{W - R}" y1="{y:.1f}" y2="{y:.1f}" stroke="#eef0f3"/>')
+        g.append(f'<text x="{L - 6}" y="{y + 3:.1f}" text-anchor="end" font-size="9.5" '
+                 f'fill="#9ca3af">{round(mx * k / 4):,}</text>')
+        if rmax > 0:
+            g.append(f'<text x="{W - R + 6}" y="{y + 3:.1f}" font-size="9.5" '
+                     f'fill="#9ca3af">{rtop * k / 4:.1f}</text>')
+    skip = 2 if len(points) > 8 else 1
+    for i, (m, n) in enumerate(points):
+        h = max(1, (n / mx) * ih)
+        x = L + i * step + (step - bw) / 2
+        y = T + ih - h
+        rate = rates.get(m)
+        title = f"{_dash_month(m)}: {n:,} complaint records"
+        if rate is not None:
+            title += f" · {rate:.2f} per 100 orders"
+        g.append(f'<rect data-month="{m}" data-n="{n}" x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" '
+                 f'height="{h:.1f}" rx="2" fill="#7ba3e8"><title>{esc(title)}</title></rect>')
+        if i % skip == 0:
+            g.append(f'<text x="{x + bw / 2:.1f}" y="{H - 8}" text-anchor="middle" '
+                     f'font-size="9.5" fill="#9ca3af">{MN[int(m[5:7]) - 1]}</text>')
+    seg, segs = [], []
+    for i, (m, _) in enumerate(points):
+        v = rates.get(m)
+        x = L + i * step + step / 2
+        if v is None:
+            if len(seg) > 1:
+                segs.append(seg)
+            seg = []
+            continue
+        seg.append((x, T + ih - ih * (v / rtop)))
+    if len(seg) > 1:
+        segs.append(seg)
+    for s in segs:
+        g.append('<polyline points="' + " ".join(f"{x:.1f},{y:.1f}" for x, y in s) +
+                 '" fill="none" stroke="#111827" stroke-width="1.6" stroke-dasharray="4 3" '
+                 'opacity=".55"/>')
+    for i, (m, _) in enumerate(points):
+        v = rates.get(m)
+        if v is None:
+            continue
+        g.append(f'<circle cx="{L + i * step + step / 2:.1f}" cy="{T + ih - ih * (v / rtop):.1f}" '
+                 f'r="2.4" fill="#111827" opacity=".6"/>')
+    return (f'<svg viewBox="0 0 {W} {H}" role="img" '
+            f'aria-label="Complaint records and records per 100 orders by month" '
+            f'data-months="{len(points)}">' + "".join(g) + "</svg>")
+
 
 def p_dashboard(cur, q, msg="", ctx=None):
-    cur.execute("SELECT COUNT(*) c FROM classifications"); total = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE human_validated=0 AND needs_review=1"); nr = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE human_validated=0 AND needs_review=1 AND has_prose=0"); nr_co = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) c FROM proposed_codes WHERE status='pending'"); pend = cur.fetchone()["c"]
+    # ---- filters --------------------------------------------------------
+    # One predicate for the cards, the mix, the chart and the strip: build_where,
+    # exactly as /reviews applies it. Range is the static page's rule — the last
+    # N months present in the corpus, inclusive — expressed as a from-date.
+    fq = {k: q.get(k) for k in ("q", "family", "month", "source") if q.get(k)}
+    win = (q.get("range") or "").strip()
+    if win in ("3", "6", "12"):
+        cur.execute("SELECT MAX(month) m FROM v_ai_complaints_monthly")
+        mxm = (cur.fetchone() or {}).get("m")
+        if mxm:
+            idx = int(mxm[:4]) * 12 + int(mxm[5:7]) - 1 - (int(win) - 1)
+            fq["from"] = f"{idx // 12:04d}-{idx % 12 + 1:02d}-01"
+    w, args = build_where(fq)
+    w_and = (w + " AND ") if w else "WHERE "
+
+    # ---- the four numbers ----------------------------------------------
+    cur.execute(f"""SELECT COUNT(*) c, COALESCE(SUM(v.has_prose=0),0) np,
+                           COALESCE(SUM(v.human_validated=1),0) hv,
+                           MIN(v.review_date) lo, MAX(v.review_date) hi
+                      FROM v_ai_complaints v {w}""", args)
+    h = cur.fetchone()
+    total, no_prose, validated = int(h["c"]), int(h["np"]), int(h["hv"])
+    lo, hi = h["lo"], h["hi"]
+    cur.execute(f"""SELECT COUNT(*) c, COALESCE(SUM(v.has_prose=0),0) np
+                      FROM v_ai_complaints v {w_and}v.human_validated=0 AND v.needs_review=1""", args)
+    h = cur.fetchone()
+    nr, nr_co = int(h["c"]), int(h["np"])
+    cur.execute("SELECT COUNT(*) c FROM proposed_codes WHERE status='pending'")
+    pend = int(cur.fetchone()["c"])
     # DISTINCT review_id, not COUNT(*): a revised decision adds a row, and
-    # counting rows would inflate "human decisions" every time she changes her mind.
-    cur.execute("SELECT COUNT(DISTINCT review_id) c FROM corrections"); corr = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE final_complaint IS NULL"); nofinal = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(DISTINCT final_complaint) c FROM v_ai_complaints"); labels = cur.fetchone()["c"]
-    cur.execute("SELECT MIN(review_date) a, MAX(review_date) b FROM classifications"); rng = cur.fetchone()
-    cur.execute("""SELECT SUM(source='ncx') ncx, SUM(source='fba') fba, COUNT(*) n FROM v_ai_complaints""")
-    src = cur.fetchone()
+    # counting rows would inflate "decisions recorded" every time she changes her mind.
+    cur.execute("SELECT COUNT(DISTINCT review_id) c FROM corrections")
+    corr = int(cur.fetchone()["c"])
 
-    # Review Deletion is a rule verdict, not a complaint: it is listed (and kept
-    # in the export) but never in the distribution, where it read as the 13th
-    # most common thing customers complain about.
-    cur.execute("""SELECT final_complaint complaint, COUNT(*) n FROM v_ai_complaints
-                    WHERE final_complaint IS NOT NULL AND final_complaint <> %s
-                    GROUP BY final_complaint ORDER BY n DESC LIMIT 14""", (PROCESS_NOISE,))
-    top = cur.fetchall()
-    mx = max([r["n"] for r in top], default=1)
-    bars = "".join(
-        f'<tr><td><a href="/reviews?complaint={urllib.parse.quote(r["complaint"])}">{esc(display_label(r["complaint"], cur))}</a></td>'
-        f'<td class="mono num">{r["n"]:,}</td>'
-        f'<td><div style="height:8px;border-radius:4px;background:var(--accent);opacity:.85;width:{int(r["n"]/mx*100)}%"></div></td></tr>'
-        for r in top)
+    # ---- what people complained about ----------------------------------
+    cur.execute(f"""SELECT v.final_complaint c, COUNT(*) n FROM v_ai_complaints v {w}
+                     GROUP BY v.final_complaint ORDER BY n DESC""", args)
+    dist = cur.fetchall()
+    blank = noise = 0
+    bars = []
+    for r in dist:
+        c, k = r["c"], int(r["n"])
+        if c is None:
+            blank = k
+        elif c == PROCESS_NOISE:
+            noise = k
+        else:
+            bars.append((c, k))
+    bars.sort(key=lambda x: (-x[1], x[0]))
+    bars_total = sum(k for _, k in bars)
+    unassigned = blank + noise
+    top, rest = bars[:6], bars[6:]
+    rest_n = sum(k for _, k in rest)
 
-    body = f"""<h1>Dashboard</h1>
-<p class="sub">Resolved labels across {total:,} complaint records, {rng['a']} to {rng['b']}. Every count uses the resolved
-complaint: the team's correction where one exists, the AI's label otherwise. {nofinal:,} row(s) carry no
-complaint — marked not a complaint, or the AI could not assign one — and are excluded from these figures.</p>
-<div class="grid">
-  <div class="kpi"><div class="n">{total:,}</div><div class="l">Complaint records classified</div>
-    <div class="d">{src['ncx'] or 0:,} ncx · {src['fba'] or 0:,} fba</div></div>
-  <div class="kpi"><div class="n">{nr:,}</div><div class="l">Need a human look</div>
-    <div class="d"><a href="/reviews?status=flagged&tx=prose">unreviewed and flagged</a>
-      · {nr_co:,} are <a href="/reviews?status=flagged&tx=codeonly">code only</a></div></div>
-  <div class="kpi"><div class="n">{corr:,}</div><div class="l">Records decided by a human</div>
-    <div class="d"><a href="/reviews?status=decided">view decided</a> · revisions count once</div></div>
-  <div class="kpi"><div class="n">{labels}</div><div class="l">Codes in use</div>
-    <div class="d">distinct resolved labels</div></div>
-  <div class="kpi"><div class="n">{pend}</div><div class="l">New codes to decide</div>
-    <div class="d"><a href="/codes">review the queue</a></div></div>
+    # ---- over time ------------------------------------------------------
+    # Counts: resolved complaint, not Review Deletion, dated — the same series
+    # /reviews plots. Trimmed to the run holding 99.5%, as /reviews does, so the
+    # two charts show the same months.
+    ws = w_and + ("v.review_date IS NOT NULL AND v.final_complaint IS NOT NULL "
+                  "AND v.final_complaint <> %s")
+    cur.execute(f"""SELECT COALESCE(v.source,'') s, DATE_FORMAT(v.review_date,'%%Y-%%m') m,
+                           COUNT(*) n
+                      FROM v_ai_complaints v {ws}
+                     GROUP BY s, m ORDER BY m""", args + [PROCESS_NOISE])
+    by_src, mcount = {}, {}
+    for r in cur.fetchall():
+        if not r["m"]:
+            continue
+        by_src.setdefault(r["s"], {})[r["m"]] = int(r["n"])
+        mcount[r["m"]] = mcount.get(r["m"], 0) + int(r["n"])
+    months_all = sorted(mcount.items())
+    kept, omitted = _trim_months(months_all)
+    months = [m for m, _ in kept]
+
+    cur.execute("SELECT source s, MAX(review_date) d FROM v_ai_complaints GROUP BY source")
+    src_max = {r["s"] or "": r["d"] for r in cur.fetchall()}
+
+    # The rate's numerator and denominator, per month: records in SKU-months the
+    # finance feed covers (a month that sold 0 orders has no denominator), over
+    # the product scope's orders. Exactly /reviews' exposure(), at month grain.
+    ords = month_orders(cur, fq, months) if months else {}
+    rates, cov_by_month, outside = {}, {}, 0
+    if months:
+        cur.execute(f"""SELECT DATE_FORMAT(v.review_date,'%%Y-%%m') m, COUNT(*) n,
+                               SUM(s.orders IS NULL) nosales, SUM(s.orders = 0) zero
+                          FROM v_ai_complaints v
+                          LEFT JOIN sales_by_sku_month s
+                                 ON s.sku = v.sku
+                                AND s.month = DATE_FORMAT(v.review_date,'%%Y-%%m')
+                         {w_and}v.sku IS NOT NULL AND v.review_date IS NOT NULL
+                           AND v.final_complaint IS NOT NULL AND v.final_complaint <> %s
+                           AND (v.final_category IS NULL
+                                OR v.final_category NOT IN ('NEW','NO_TEXT','ERR'))
+                         GROUP BY m""", args + [PROCESS_NOISE])
+        rate_rows = {r["m"]: r for r in cur.fetchall()}
+        for m, _ in months_all:
+            if m not in months:
+                r = rate_rows.get(m)
+                outside += int(r["n"]) if r else 0
+        for m in months:
+            r = rate_rows.get(m)
+            cov = int(r["n"]) - int(r["nosales"] or 0) - int(r["zero"] or 0) if r else 0
+            o = int((ords.get(m) or {}).get("orders") or 0)
+            cov_by_month[m] = cov
+            rates[m] = (100.0 * cov / o) if o > 0 else None
+    orders = sum(int((ords.get(m) or {}).get("orders") or 0) for m in months)
+    units = sum(int((ords.get(m) or {}).get("units") or 0) for m in months)
+    recs_cov = sum(cov_by_month.values())
+    rate = (100.0 * recs_cov / orders) if (orders >= RATE_FLOOR and recs_cov) else None
+
+    # ---- header ---------------------------------------------------------
+    if lo and hi:
+        span_txt = (f"{_dash_day(lo)} – {_dash_day(hi)}" if str(lo) != str(hi)
+                    else _dash_day(lo))
+    else:
+        span_txt = "no records match these filters"
+
+    families = options(cur, "SELECT product_family k, COUNT(*) n FROM v_ai_complaints "
+                            "WHERE product_family IS NOT NULL GROUP BY product_family "
+                            "ORDER BY k")
+    sources = options(cur, "SELECT source k, COUNT(*) n FROM v_ai_complaints "
+                           "WHERE source IS NOT NULL GROUP BY source ORDER BY k")
+
+    def _sel(name, vals, cur_val, any_label):
+        opts = [f'<option value="">{any_label}</option>']
+        opts += [f'<option value="{esc(k)}"{" selected" if cur_val == k else ""}>{esc(k)}</option>'
+                 for k, _ in vals]
+        return f'<select name="{name}" id="{name}sel">' + "".join(opts) + "</select>"
+
+    ranges = [("", "all"), ("3", "last 3 months"), ("6", "last 6 months"),
+              ("12", "last 12 months")]
+    range_sel = ('<select name="range">' + "".join(
+        f'<option value="{v}"{" selected" if win == v else ""}>{lbl}</option>'
+        for v, lbl in ranges) + "</select>")
+
+    # ---- cards ----------------------------------------------------------
+    rec_qs = esc(qstr(fq))
+    rec_href = f"/reviews?{rec_qs}" if rec_qs else "/reviews"
+    cards = [
+        (total, "complaint records", "all sources and families", rec_href),
+        (nr, "need a human check", f"unreviewed and flagged · {nr_co:,} code only",
+         f"/reviews?{esc(qstr(fq, status='flagged'))}"),
+        (pend, "codes awaiting a decision", "not in the complaint list yet", "/codes"),
+        (corr, "decisions recorded", "confirmed, corrected or removed",
+         f"/reviews?{esc(qstr(fq, status='decided'))}"),
+    ]
+    cards_html = "".join(
+        f'<a class="dcard" href="{href}"><div class="n">{n:,}</div>'
+        f'<div class="l">{lbl}</div><div class="s">{sub}</div></a>'
+        for n, lbl, sub, href in cards)
+
+    # ---- mix -------------------------------------------------------------
+    mx = bars[0][1] if bars else 1
+
+    def _mrow(c, k, cls="", title=""):
+        t = f' title="{esc(title)}"' if title else ""
+        return (f'<div class="drow {cls}" data-code="{esc(c)}" data-n="{k}"{t}>'
+                f'<span class="dname">{esc(display_label(c, cur) if c != NO_CODE else "not assigned")}</span>'
+                f'<span class="dnum">{k:,}</span>'
+                f'<span class="dbar"><i style="width:{max(2, round(k * 100 / mx))}%"></i></span></div>')
+
+    mix_rows = "".join(_mrow(c, k) for c, k in top)
+    if rest:
+        mix_rows += (f'<button class="drow more" id="mixmore" aria-expanded="false" '
+                     f'data-codes="{len(rest)}"><span class="dname">everything else '
+                     f'({len(rest)} code{"s" if len(rest) != 1 else ""})'
+                     f'<span class="darrow">▸</span></span><span class="dnum">{rest_n:,}</span>'
+                     f'<span class="dbar"><i style="width:{max(2, round(rest_n * 100 / mx))}%">'
+                     f'</i></span></button>')
+    if unassigned:
+        mix_rows += (f'<div class="drow muted" data-code="{esc(NO_CODE)}" data-n="{unassigned}" '
+                     f'title="{blank:,} with no complaint code, {noise:,} Review Deletion '
+                     f'(process noise)"><span class="dname">not assigned</span>'
+                     f'<span class="dnum">{unassigned:,}</span>'
+                     f'<span class="dbar"><i style="width:{max(2, round(unassigned * 100 / mx))}%">'
+                     f'</i></span></div>')
+    mix_all = "".join(_mrow(c, k, "muted", c) for c, k in rest)
+    if not total:
+        mix_rows = '<div class="dcap">Nothing matches those filters.</div>'
+        mix_all = ""
+
+    # ---- trend ----------------------------------------------------------
+    if kept:
+        trend_html = (f'<div class="dtrend">{_dash_bars_svg(kept, rates)}</div>'
+                      f'<div class="dlegend"><span><i class="sw"></i>complaint records</span>'
+                      f'<span><i class="swl"></i>records per 100 orders</span></div>')
+        trend_head = (f"{_dash_month(months[0])} – {_dash_month(months[-1])}"
+                      if len(months) > 1 else _dash_month(months[0]))
+        cap = _dash_coverage(months, by_src, src_max, omitted)
+    else:
+        trend_html = '<div class="dcap">No dated complaint records in this selection.</div>'
+        trend_head = ""
+        cap = ""
+
+    # ---- rate strip ------------------------------------------------------
+    sep = '<span class="sep">·</span>'
+    bits = [f'<span><b>{orders:,}</b> orders</span>', f'<span><b>{units:,}</b> units</span>']
+    if not recs_cov:
+        bits.append("<span>no rate — no complaint records</span>")
+    elif not orders:
+        bits.append("<span>no rate — 0 orders in scope</span>")
+    elif orders < RATE_FLOOR:
+        bits.append(f"<span>no rate — under {RATE_FLOOR} orders</span>")
+    else:
+        bits.append(f'<span><b>{rate:.2f}</b> complaints per 100 orders</span>')
+    bits.append(f'<span><b>{corr:,}</b> decisions recorded</span>')
+    cur.execute("""SELECT COALESCE(source,'') s, COUNT(*) n FROM v_ai_complaints v """
+                f"""{w} GROUP BY s""", args)
+    src_count = {r["s"]: int(r["n"]) for r in cur.fetchall()}
+    end = "".join(f'<span>{s} <b>{src_count.get(s, 0):,}</b></span>'
+                  for s in ("fba", "ncx", "amazon"))
+    if src_count.get(""):
+        end += f'<span>unlabelled <b>{src_count[""]:,}</b></span>'
+    strip = sep.join(bits) + f'<span class="end">{end}</span>'
+
+    # ---- the disclosure --------------------------------------------------
+    # Everything the old page said inline, moved here verbatim in substance.
+    if rate is not None:
+        rate_txt = (f"<b>{orders:,}</b> orders and <b>{units:,}</b> units across the months shown — "
+                    f"<b>{rate:.2f}</b> complaint records per 100 orders. Orders are the seller's own "
+                    f"finance feed for the scope, all marketplaces; complaints are review records, "
+                    f"so this is a record rate, not a return rate.")
+    elif not recs_cov:
+        rate_txt = "No complaint records in this filter, so there is no rate to quote."
+    elif not orders:
+        rate_txt = ("The product scope sold <b>0 orders</b> in these months, so the rate is "
+                    "undefined — it is not 0.00, which would claim no complaints per order.")
+    else:
+        rate_txt = (f"<b>{orders:,}</b> orders in scope — under the {RATE_FLOOR}-order floor, so no "
+                    f"rate is quoted above. The counts and shares are unaffected.")
+    if outside:
+        rate_txt += (f" {outside:,} record{'s' if outside != 1 else ''} fall outside "
+                     f"{_dash_month(months[0])} to {_dash_month(months[-1])} and are not in "
+                     f"this rate.")
+    feed_txt = (f"Period {_dash_month(months[0])} to {_dash_day(hi)}. " if months else "")
+    feed_txt += ("No month-on-month change is shown: a change figure needs the same feeds on both "
+                 "sides, because a feed that starts or stops inside a window moves the total without "
+                 "any customer changing their behaviour. The counts and shares are unaffected.")
+    if hi and str(hi) >= str(date.today()):
+        feed_txt += (f" Today ({_dash_day(str(hi))}) is incomplete and is not counted in the rates.")
+
+    about = f"""<details class="dabout">
+<summary>About this data <span>reconciliation · coverage · what the rate is</span></summary>
+<div class="dbody">
+<p><b>Reconciliation.</b> <b>{total:,}</b> rows match these filters · <b>{bars_total:,}</b> carry a
+real complaint · <b>{blank:,}</b> carry no complaint · <b>{noise:,}</b> are process noise (Review
+Deletion). Those three add to <b>{bars_total + blank + noise:,}</b>. The mix shows the six largest
+complaint types; every other code is under “everything else”, and the records with no complaint are
+under “not assigned”. <b>{len(bars):,}</b> distinct complaint code{"" if len(bars) == 1 else "s"} are
+in the mix{"; Review Deletion is a further distinct label, counted only as process noise" if noise else ""}.</p>
+<p><b>Feed coverage.</b> {feed_txt}</p>
+<p><b>Picklist-only records.</b> <b>{no_prose:,}</b> of <b>{total:,}</b> rows carry no customer
+comment; they hold the return-reason picklist only, so no label on them can be checked against what
+a customer wrote (<b>{nr_co:,}</b> of them are still unreviewed).</p>
+<p><b>What the rate is.</b> {rate_txt}</p>
+<p><b>Validation status.</b> <b>{validated:,}</b> of <b>{total:,}</b> records have a decision
+recorded in this app so far — each record counts once, however many times its decision was revised. The labels themselves were validated before launch: the CX team has
+553,055 human-labelled review×complaint pairs in the live module, and Chadia’s own blind 220-row
+check of this AI put agreement at 83.6%. Figures and the mix use the corrected label where one
+exists, and the AI’s own label stays on each row for audit.</p>
+<p><b>Process noise.</b> <b>{noise:,}</b> records are Review Deletion — a rule verdict on empty or
+non-complaint text, not a complaint. They stay in the records table and the CSV; the mix counts them
+only so the totals reconcile.</p>
+<p><b>Status labels.</b> <b>automatic</b> — the AI was confident and used a code you already have ·
+<b>needs check</b> — it wasn't sure, so a person should confirm · <b>new code</b> — it used a
+complaint type that isn't in your list yet · <b>confirmed / corrected / removed</b> — someone has
+already decided.</p>
+</div></details>"""
+
+    body = f"""<div class="dash">
+<div class="dhead">
+  <div><h1>Complaint validation</h1>
+    <div class="dsub">{span_txt} · resolved labels: the team’s correction where one exists, the
+    AI’s label otherwise.</div></div>
+  <div class="dacts">
+    <span class="ro" title="this page cannot write to the database">Read-only</span>
+    <a class="dbtn" href="/export.csv?{rec_qs}">Export CSV</a>
+    <a class="dbtn" href="/export.csv?{esc(qstr(fq, text='1'))}" title="same rows plus the review text">Export with text</a>
+    <a class="dbtn" href="https://uep-ai-complaints.pages.dev/index.html" target="_blank" rel="noopener">Read-only page ↗</a>
+  </div>
 </div>
-<h2>Most common complaints</h2>
-<p class="sub" style="margin:-6px 0 10px">Whole corpus, no filters. For a date range and a product —
-“what did seat-cushion buyers complain about in Jul–Sep, and what grew?” — use the
-<a href="/reviews?family=Seat+cushions">complaint mix on Complaint records</a>.</p>
-<div class="card"><table><thead><tr><th>Complaint</th><th class="num">Records</th><th style="width:38%"></th></tr></thead>
-<tbody>{bars}</tbody></table></div>"""
-    return page("Dashboard", body, "/", msg, ctx=ctx)
+<form class="dfilters" method="get" action="/">
+  <div class="df"><label for="famsel">Family</label>{_sel('family', families, q.get('family'), 'All product families')}</div>
+  <div class="df"><label for="datesel">Date</label>
+    <input id="datesel" name="month" value="{esc(q.get('month', ''))}" placeholder="all dates · YYYY-MM"></div>
+  <div class="df"><label for="winsel">Range</label>{range_sel}</div>
+  <div class="df"><label for="srcsel">Source</label>{_sel('source', sources, q.get('source'), 'All sources')}</div>
+  <div class="df grow"><label for="qsel">Search</label>
+    <input id="qsel" name="q" value="{esc(q.get('q', ''))}" placeholder="search the review text"></div>
+  <button class="primary dapply" type="submit">Apply</button>
+  {f'<a class="dclear" href="/">clear</a>' if (fq or win) else ''}
+</form>
+<div class="dcards">{cards_html}</div>
+<div class="duo">
+  <section class="dpanel">
+    <div class="dphead"><h2>What people complained about</h2>
+      <span class="dpcount">{total:,} records</span></div>
+    {mix_rows}
+    <div class="dall" id="mixall" hidden>{mix_all}</div>
+  </section>
+  <section class="dpanel">
+    <div class="dphead"><h2>Over time</h2><span class="dpcount">{trend_head}</span></div>
+    {trend_html}
+    <div class="dcap">{cap}</div>
+  </section>
+</div>
+<div class="dstrip">{strip}</div>
+<a class="dopen" href="{rec_href}">Open the complaint records →</a>
+{about}
+</div>"""
+    ctx = dict(ctx or {})
+    ctx["css"] = DASH_CSS
+    ctx["scripts"] = DASH_MIX_JS
+    return page("Complaint validation", body, "/", msg, ctx=ctx)
 
 
 # ---------------------------------------------------------------- reviews list
