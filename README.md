@@ -13,12 +13,11 @@ mirror for anyone who only wants to look.
 ```
 app.py                 the review app — the only surface that writes decisions
 deploy_on_box.sh       installs it on ops-automations, nginx on :80 behind the proxy
-                everything that produces the numbers (see pipeline/README.md)
-  cx_refresh.sh          the 30-minute chain: classify -> load -> views -> build -> deploy
-  cxvocab.py             the complaint vocabulary and the model prompt
-  apply_views.py         all views + assertions on grain and denominators
-  build_sales.py         joins the read-only replica's finance data for the rate
-  taxonomy/              Chadia's audit files, vendored so a clone works
+cx_refresh.sh          the 30-minute chain: classify -> load -> views -> build -> deploy
+cxvocab.py             the complaint vocabulary and the model prompt
+apply_views.py         all views + assertions on grain and denominators
+build_sales.py         joins the read-only replica's finance data for the rate
+taxonomy/              Chadia's audit files, vendored so a clone works
 tests/                 check_mix_consistency.py, test_sales_rates.py
 POWERBI.md             the PowerBI path for the QC Data Tracker
 .env.example           every setting, no secrets
