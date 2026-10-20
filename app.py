@@ -842,6 +842,44 @@ def product_cell(r):
 # One filter builder for the list, the count, the export and the pager, so a
 # filter cannot work on screen and silently not apply to the CSV.
 
+# The single 'status' control carried three unrelated dimensions. It is now two
+# controls with two query names; these are the values old links still send, each
+# mapped to the (label, review) pair it always meant.
+_LEGACY_STATUS = {
+    "nolabel": ("", "nolabel"), "new": ("", "nolabel"),
+    "decided": ("", "decided"),
+    "unsure": ("", "needreview"), "flagged": ("", "needreview"),
+    "newcode": ("", "newcode"),
+    "ai": ("ai", ""), "human": ("human", ""), "excluded": ("excluded", ""),
+}
+
+# One source of truth for the two controls' vocabulary, shared by /reviews and
+# the dashboard so the same words mean the same rows on both surfaces.
+LABEL_OPTS = [("ai", "AI Classified"), ("human", "Human Classified"),
+              ("excluded", "Excluded")]
+# The counts on the first two are GLOBAL facts about the corpus, not scoped to
+# the current filter, so they do not drift every time a date range narrows.
+REVIEW_OPTS = [("needreview", "Needs review"), ("nolabel", "No label"),
+               ("newcode", "New code"), ("decided", "Decided")]
+
+
+def _opt_select(name, opts, cur_val, any_label="Any", counts=None):
+    """A filter control: 'Any' first, then exactly the given values.
+
+    No option can appear twice and none is inferred from another control's
+    vocabulary, which is what keeps 'Label' and 'Review' from offering the same
+    value in two places.
+    """
+    html = [f'<option value="">{esc(any_label)}</option>']
+    for v, lbl in opts:
+        text = lbl
+        if counts and v in counts:
+            text = f"{lbl} ({counts[v]:,})"
+        sel = " selected" if (cur_val or "") == v else ""
+        html.append(f'<option value="{esc(v)}"{sel}>{esc(text)}</option>')
+    return f'<select name="{esc(name)}" id="{esc(name)}sel">' + "".join(html) + "</select>"
+
+
 def build_where(q):
     where, args = [], []
     if q.get("q"):
@@ -880,31 +918,43 @@ def build_where(q):
         where.append("v.review_date >= %s"); args.append(q["from"])
     if q.get("to"):
         where.append("v.review_date <= %s"); args.append(q["to"])
-    st = q.get("status") or ""
-    if st in ("nolabel", "new"):
-        # The ONLY state that is waiting for a person: no label at all, because
-        # the classifier could not read a complaint here. Legitimate: rows the AI
-        # labelled — confident or not — are finished work, not a queue.
-        where.append("v.final_complaint IS NULL")
-    elif st == "decided":
-        where.append("v.human_validated=1")
-    elif st in ("unsure", "flagged"):
-        # Confidence, not a queue. These rows all carry a label; the filter exists
-        # so anyone auditing the classifier can reach its low-confidence calls.
-        where.append("v.needs_review=1")
-    elif st == "newcode":
-        where.append("v.is_new_code=1")
-    elif st == "ai":
+    # ---- two controls, two questions (F12) -------------------------------
+    # 'label' is PROVENANCE: whose badge the row carries (the classifier's, a
+    # person's, or 'Excluded'). 'review' is WHAT STILL NEEDS A PERSON: needs
+    # review, no label, new code, already decided. One dropdown used to carry both,
+    # which made "AI Classified" and "AI was unsure" sit side by side as if they
+    # were answers to the same question — they are not, and they must compose:
+    # ?label=ai&review=needreview is 'AI-labelled rows the classifier was unsure
+    # about', which the single control could not express at all.
+    lbl = q.get("label") or ""
+    rev = q.get("review") or ""
+    if not (lbl or rev):
+        # Old links stay alive: the dashboard cards, the CSV exports and anything
+        # bookmarked before the split still carry status=, so map each legacy
+        # value onto the pair it now belongs to. Nothing is silently dropped.
+        lbl, rev = _LEGACY_STATUS.get(q.get("status") or "", ("", ""))
+    if lbl == "ai":
         # Provenance, not status: no human decision exists, so the label on
         # screen is the classifier's.
         where.append("v.human_decision IS NULL")
-    elif st == "human":
+    elif lbl == "human":
         # accepted + corrected only. A rejected row carries a human decision but
         # reports no label at all, so it must not answer a 'Human Classified'
         # filter — that would put an 'Excluded' badge under a human filter.
         where.append("v.human_decision IN ('accepted','corrected')")
-    elif st == "excluded":
+    elif lbl == "excluded":
         where.append("v.human_decision='rejected'")
+    if rev == "needreview":
+        # The signal the classifier itself flagged. Named for what the reader does
+        # with it, not for the model's feeling: those rows want a person's eyes.
+        where.append("v.needs_review=1")
+    elif rev == "nolabel":
+        # No label at all: the classifier could not read a complaint here.
+        where.append("v.final_complaint IS NULL")
+    elif rev == "newcode":
+        where.append("v.is_new_code=1")
+    elif rev == "decided":
+        where.append("v.human_validated=1")
     txt = q.get("tx") or ""
     if txt == "codeonly":
         # No free text: only the return-reason picklist, so there is nothing to
@@ -2072,7 +2122,7 @@ def mix_block(cur, q, n):
            f' review×complaint pairs) and by Chadia\u2019s blind 220-row check of this AI (83.6% agreement)')
 
     # Each toggle REPLACES its own dimension and KEEPS the others, so with
-    # status=flagged "all rows" means flagged-and-no-text (137), not 1,571. That
+    # review=needreview "all rows" means needs-review-and-no-text, not 2,155. That
     # makes the five counts five different WHERE clauses; one scan cannot produce
     # them (tried it: it silently widened every toggle to the un-statused family).
     def _tog(label, over, on):
@@ -2090,7 +2140,7 @@ def mix_block(cur, q, n):
     togs = (f'{_tog("all rows", {"tx": ""}, not q.get("tx"))} · '
             f'{_tog("with a comment", {"tx": "prose"}, q.get("tx") == "prose")} · '
             f'{_tog("picklist only", {"tx": "codeonly"}, q.get("tx") == "codeonly")} · '
-            f'{_tog("human-validated only", {"status": "decided"}, q.get("status") == "decided")} · '
+            f'{_tog("human-validated only", {"review": "decided"}, q.get("review") == "decided")} · '
             f'{_tog("count every row" if deduped else "distinct complaints", dup_over, False)}')
 
     # F2: the repeat key is (order_id, MD5(text)) — the SAME comment recorded twice
@@ -2416,7 +2466,7 @@ def p_dashboard(cur, q, msg="", ctx=None):
     # One predicate for the cards, the mix, the chart and the strip: build_where,
     # exactly as /reviews applies it. Range is the static page's rule — the last
     # N months present in the corpus, inclusive — expressed as a from-date.
-    fq = {k: q.get(k) for k in ("q", "family", "month", "source") if q.get(k)}
+    fq = {k: q.get(k) for k in ("q", "family", "month", "source", "label", "review") if q.get(k)}
     win = (q.get("range") or "").strip()
     if win in ("3", "6", "12"):
         cur.execute("SELECT MAX(month) m FROM v_ai_complaints_monthly")
@@ -2554,6 +2604,13 @@ def p_dashboard(cur, q, msg="", ctx=None):
                             "ORDER BY k")
     sources = options(cur, "SELECT source k, COUNT(*) n FROM v_ai_complaints "
                            "WHERE source IS NOT NULL GROUP BY source ORDER BY k")
+    # Global counts for the two options that carry one, exactly as /reviews does
+    # it: a corpus fact, not a number that slides with the date range.
+    cur.execute("""SELECT COALESCE(SUM(needs_review=1),0) nr,
+                          COALESCE(SUM(final_complaint IS NULL),0) nl
+                     FROM v_ai_complaints""")
+    _gc = cur.fetchone()
+    review_counts = {"needreview": int(_gc["nr"]), "nolabel": int(_gc["nl"])}
 
     def _sel(name, vals, cur_val, any_label):
         opts = [f'<option value="">{any_label}</option>']
@@ -2575,15 +2632,15 @@ def p_dashboard(cur, q, msg="", ctx=None):
         # Unclassified, in the position the review queue used to hold: a row only
         # waits for a person when the AI produced no label for it.
         (unlab, "unclassified", "no label — the AI could not read a complaint",
-         f"/reviews?{esc(qstr(fq, status='nolabel'))}"),
+         f"/reviews?{esc(qstr(fq, label='', review='nolabel'))}"),
         (pend, "codes awaiting a decision", "not in the complaint list yet", "/codes"),
         (corr, "decisions recorded", "confirmed, corrected or removed",
-         f"/reviews?{esc(qstr(fq, status='decided'))}"),
+         f"/reviews?{esc(qstr(fq, label='', review='decided'))}"),
         # Appended, never inserted: the first four keep their order and their
         # numbers. This one answers a different question — whose label is being
         # reported — with the share it holds of the rows on screen.
         (human_n, "Human classified", f"{human_pct_txt} of all records",
-         f"/reviews?{esc(qstr(fq, status='human'))}"),
+         f"/reviews?{esc(qstr(fq, label='human', review=''))}"),
     ]
     cards_html = "".join(
         f'<a class="dcard" href="{href}"><div class="n">{n:,}</div>'
@@ -2710,12 +2767,16 @@ one appears, marks a row with no label at all — a different question.</p>
 <p><b>Process noise.</b> <b>{noise:,}</b> records are Review Deletion — a rule verdict on empty or
 non-complaint text, not a complaint. They stay in the records table and the CSV; the mix counts them
 only so the totals reconcile.</p>
-<p><b>Status labels.</b> The classifier labels every row it can read, and a labelled row carries no
-status tag — the label is finished work, not a flag. <b>unclassified</b> — no label at all, so that
-is the only row waiting for a person · <b>new code</b> — it used a complaint type that isn't in your
-list yet · <b>confirmed / corrected / removed</b> — someone has already decided. Low confidence is
-not a queue: those rows are labelled, and the signal stays reachable through the 'AI was unsure'
-filter for anyone auditing it.</p>
+<p><b>Two filters, two questions.</b> <b>Label</b> says whose label a row reports —
+<b>AI Classified</b>: nobody has decided it yet, so the label is the classifier's · <b>Human
+Classified</b>: a person confirmed or corrected it, and theirs is the label being counted ·
+<b>Excluded</b>: a person marked it not a complaint, so it reports no label at all. <b>Review</b>
+says what still wants a person — <b>Needs review</b>: the classifier flagged its own call as low
+confidence · <b>No label</b>: it could not read a complaint at all · <b>New code</b>: it used a
+complaint type that isn't in your list yet · <b>Decided</b>: a human decision exists. The two
+combine, and that is the point: AI Classified + Needs review is every low-confidence call nobody has
+looked at yet. A labelled row carries no status tag, because the label is finished work; the Review
+filter is how you reach the rows that are not.</p>
 </div></details>"""
 
     body = f"""<div class="dash">
@@ -2735,6 +2796,8 @@ filter for anyone auditing it.</p>
   <div class="df"><label for="datesel">Date</label>
     <input id="datesel" name="month" value="{esc(q.get('month', ''))}" placeholder="all dates · YYYY-MM"></div>
   <div class="df"><label for="winsel">Range</label>{range_sel}</div>
+  <div class="df"><label for="labelsel">Label</label>{_opt_select('label', LABEL_OPTS, q.get('label'))}</div>
+  <div class="df"><label for="reviewsel">Review</label>{_opt_select('review', REVIEW_OPTS, q.get('review'), counts=review_counts)}</div>
   <div class="df"><label for="srcsel">Source</label>{_sel('source', sources, q.get('source'), 'All sources')}</div>
   <div class="df grow"><label for="qsel">Search</label>
     <input id="qsel" name="q" value="{esc(q.get('q', ''))}" placeholder="search the review text"></div>
@@ -2872,7 +2935,7 @@ def p_reviews(cur, q, msg="", ctx=None):
         merged[lbl] = merged.get(lbl, 0) + cnt
     complaints = sorted(merged.items(), key=lambda kv: -kv[1])
 
-    # The counts on the two status options are GLOBAL, not scoped to the current
+    # The counts on the two review options are GLOBAL, not scoped to the current
     # filter: 'No label (41)' must read as a fact about the corpus, not drift
     # every time someone narrows a date range.
     cur.execute("""SELECT COALESCE(SUM(final_complaint IS NULL),0) nl,
@@ -2880,18 +2943,12 @@ def p_reviews(cur, q, msg="", ctx=None):
                      FROM v_ai_complaints""")
     _sc = cur.fetchone()
     nl_n, un_n = int(_sc["nl"]), int(_sc["un"])
-    statuses = "".join(f'<option value="{v}"{" selected" if q.get("status")==v else ""}>{lbl}</option>'
-                       for v, lbl in [("nolabel", f"No label ({nl_n:,})"),
-                                      ("decided", "Decided"), ("newcode", "New code"),
-                                      # Provenance rides in the same control: one dropdown,
-                                      # because a second one beside it would filter the same
-                                      # column and the two could contradict each other.
-                                      ("ai", "AI Classified"), ("human", "Human Classified"),
-                                      ("excluded", "Excluded"),
-                                      # Last, deliberately: confidence is a question an
-                                      # auditor asks, not a queue anyone is expected to
-                                      # work. The rows behind it all carry a label.
-                                      ("unsure", f"AI was unsure ({un_n:,})")])
+    # Two controls, not one: 'Label' answers whose badge a row carries, 'Review'
+    # answers what still wants a person. Neither value appears in both, so a
+    # chosen pair always means one thing.
+    review_counts = {"needreview": un_n, "nolabel": nl_n}
+    label_sel = _opt_select("label", LABEL_OPTS, q.get("label"))
+    review_sel = _opt_select("review", REVIEW_OPTS, q.get("review"), counts=review_counts)
     # The complaint dropdown keeps the stored value (it is a filter, so it must
     # match the column) and only changes what it reads as.
     complaint_select = select('complaint', [(k, display_label(k, cur), n) for k, n in complaints],
@@ -2927,7 +2984,8 @@ def p_reviews(cur, q, msg="", ctx=None):
   <div><label>Complaint</label>{complaint_select}</div>
   <div><label>Source</label>{select('source', sources, q.get('source'))}</div>
   <div><label>Country</label>{select('country', countries, q.get('country'))}</div>
-  <div><label>Status</label><select name="status"><option value="">Any</option>{statuses}</select></div>
+  <div><label for="labelsel">Label</label>{label_sel}</div>
+  <div><label for="reviewsel">Review</label>{review_sel}</div>
   <div><label>Text</label><select name="tx">
     <option value="">Any</option>
     <option value="prose"{" selected" if q.get("tx")=="prose" else ""}>Has a customer comment</option>

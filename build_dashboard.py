@@ -644,6 +644,14 @@ td.txt .prose{display:block;margin-top:2px}
         <input id="datesel" data-f="d" placeholder="all dates · YYYY-MM" aria-label="Month, YYYY-MM"></div>
       <div class="f"><label for="winsel">Range</label>
         <select id="winsel" data-f="win" aria-label="Recent months"><option value="">all</option><option value="3">last 3 months</option><option value="6">last 6 months</option><option value="12">last 12 months</option></select></div>
+      <!-- Two controls, two questions. Label = whose badge the row carries
+           (provenance); Review = what still wants a person. They compose, so
+           AI Classified + Needs review is every low-confidence call nobody has
+           looked at yet — something the old single Status select could not say. -->
+      <div class="f"><label for="labelsel">Label</label>
+        <select id="labelsel" data-f="lb" aria-label="Label provenance"><option value="">Any</option><option value="ai">AI Classified</option><option value="human">Human Classified</option><option value="excluded">Excluded</option></select></div>
+      <div class="f"><label for="reviewsel">Review</label>
+        <select id="reviewsel" data-f="rv" aria-label="Review state"><option value="">Any</option><option value="needreview">Needs review</option><option value="nolabel">No label</option><option value="newcode">New code</option><option value="decided">Decided</option></select></div>
       <div class="f"><label for="srcsel">Source</label>
         <select id="srcsel" data-f="src"><option value="">All sources</option></select></div>
       <div class="f grow"><label for="qsel">Search</label>
@@ -675,7 +683,7 @@ td.txt .prose{display:block;margin-top:2px}
         <thead>
           <tr><th>Status</th><th>Date</th><th>ASIN</th><th>SKU</th><th>Complaint</th><th>Review</th></tr>
           <tr class="filterrow">
-            <th><select data-f="st"><option value="">All reviews</option><option value="nolabel">No label</option><option value="nc">Uses a new code</option><option value="codeonly">No comment (code only)</option><option value="ok">Handled automatically</option><option value="done">Checked by the team</option><option value="ai">AI Classified</option><option value="human">Human Classified</option><option value="excluded">Excluded</option><option value="unsure">AI was unsure</option></select></th>
+            <th></th>
             <th></th>
             <th><input data-f="a" placeholder="filter"></th>
             <th><input data-f="s" placeholder="filter"></th>
@@ -718,7 +726,7 @@ td.txt .prose{display:block;margin-top:2px}
       <p><b>Validation status.</b> <span id="a-valid"></span></p>
       <p><b>Label source.</b> <span id="a-src"></span></p>
       <p><b>Process noise.</b> <span id="a-noise"></span></p>
-      <p><b>Status labels.</b> The classifier labels every row it can read, and a labelled row carries no status tag — the label is finished work, not a flag · <b>unclassified</b> — no label at all, so that is the only row waiting for a person · <b>new code</b> — it used a complaint type that isn't in your list yet · <b>confirmed / corrected / removed</b> — someone has already decided. Low confidence is not a queue: those rows are labelled, and the signal stays reachable through the 'AI was unsure' filter for anyone auditing it. Figures and the complaint mix use the corrected label where one exists. The second badge on each row is separate from that: <b>AI Classified</b> — nobody has decided it, so the label being reported is the classifier's · <b>Human Classified</b> — a person confirmed or corrected it, and their label is the one being reported · <b>Excluded</b> — a person marked it not a complaint, so it reports no label at all.</p>
+      <p><b>Two filters, two questions.</b> <b>Label</b> says whose label a row reports — <b>AI Classified</b>: nobody has decided it, so the label is the classifier's · <b>Human Classified</b>: a person confirmed or corrected it, and theirs is the label being counted · <b>Excluded</b>: a person marked it not a complaint, so it reports no label at all. <b>Review</b> says what still wants a person — <b>Needs review</b>: the classifier flagged its own call as low confidence · <b>No label</b>: it could not read a complaint at all · <b>New code</b>: it used a complaint type that isn't in your list yet · <b>Decided</b>: a human decision exists. They combine, and that is the point: AI Classified + Needs review is every low-confidence call nobody has looked at yet.</p>
     </div>
   </details>
 </main></div>
@@ -739,26 +747,30 @@ let ROWS=[], VIEW=[], MIXSCOPE=[], page=0, PER=100, cur=null, mixOpen=false;
 /* ---------------------------------------------------------------- cards
    Four numbers, four doors. Each one is a link to the view that answers it. */
 const CARDS=[
-  {k:"total",        l:"complaint records",         s:"all sources and families",     href:"#table",      st:""},
-  {k:"nolabel",      l:"unclassified",             s:"no label — the AI could not read it", href:"#table", st:"nolabel"},
-  {k:"pending_codes",l:"codes awaiting a decision", s:"not in the complaint list yet",href:"./codes.html",st:null},
-  {k:"corrections",  l:"corrected by the team",     s:"corrections applied to every figure", href:"#table", st:"done"},
+  {k:"total",        l:"complaint records",         s:"all sources and families",     href:"#table",      lb:"",      rv:""},
+  {k:"nolabel",      l:"unclassified",             s:"no label — the AI could not read it", href:"#table", lb:"", rv:"nolabel"},
+  {k:"pending_codes",l:"codes awaiting a decision", s:"not in the complaint list yet",href:"./codes.html",lb:null,   rv:null},
+  {k:"corrections",  l:"corrected by the team",     s:"corrections applied to every figure", href:"#table", lb:"", rv:"decided"},
   /* Appended, not inserted: the four above keep their order and their numbers.
      This one answers a different question — whose label is being reported — and
      carries the share of all records it holds underneath. */
   {k:"human",        l:"Human classified",           s:()=>{const h=KPI.human||0,t=KPI.total||1,p=100*h/t;
-     return (h?((p<1?p.toFixed(2):p.toFixed(1))+"%"):"0.0%")+" of all records"}, href:"#table", st:"human"}
+     return (h?((p<1?p.toFixed(2):p.toFixed(1))+"%"):"0.0%")+" of all records"}, href:"#table", lb:"human", rv:""}
 ];
 document.getElementById("cards").innerHTML=CARDS.map(c=>
-  `<a class="card" href="${c.href}" data-st="${c.st===null?"":c.st}">`+
+  `<a class="card" href="${c.href}" data-lb="${c.lb===null?"":c.lb}" data-rv="${c.rv===null?"":c.rv}">`+
   `<div class="n">${(KPI[c.k]||0).toLocaleString()}</div>`+
   `<div class="l">${c.l}</div><div class="s">${typeof c.s==="function"?c.s():c.s}</div></a>`).join("");
 document.getElementById("cards").addEventListener("click",e=>{
   const a=e.target.closest("a.card"); if(!a) return;
   if(a.getAttribute("href")==="./codes.html") return;   /* real navigation */
   e.preventDefault();
-  const sel=document.querySelector('[data-f="st"]');
-  if(sel){sel.value=a.dataset.st; apply();}
+  /* A card sets BOTH controls: it names one dimension and clears the other, so
+     'unclassified' cannot land on 0 rows because a Label was left over. */
+  const lb=document.querySelector('[data-f="lb"]'), rv=document.querySelector('[data-f="rv"]');
+  if(lb) lb.value=a.dataset.lb||"";
+  if(rv) rv.value=a.dataset.rv||"";
+  apply();
   document.getElementById("table").scrollIntoView({behavior:"smooth",block:"start"});
 });
 
@@ -1472,19 +1484,16 @@ function keepRow(r,raw,low,cut,skipDate){
   if(raw.fc && (r.fc||"")!==raw.fc) return false;
   if(low("q") && !(r.t||"").toLowerCase().includes(low("q"))) return false;
   if(raw.fam && (r.fam||"")!==raw.fam) return false;
-  if(raw.st==="codeonly" && r.hp) return false;
-  /* 'nr' is kept as an alias so an older link to the confidence view still lands
-     on the confidence view instead of silently filtering nothing. */
-  if((raw.st==="unsure"||raw.st==="nr") && !r.nr) return false;
-  if(raw.st==="nolabel" && r.fc) return false;
-  if(raw.st==="nc" && !r.nc) return false;
-  if(raw.st==="ok" && (!r.fc||r.nr||r.nc||r.dec)) return false;
-  if(raw.st==="done" && !r.dec) return false;
-  /* Provenance values in the same control as the status values: one column,
-     one dropdown, so the two can never contradict each other. */
-  if(raw.st==="ai" && r.dec) return false;
-  if(raw.st==="human" && !(r.dec==="accepted"||r.dec==="corrected")) return false;
-  if(raw.st==="excluded" && r.dec!=="rejected") return false;
+  /* Label = provenance: whose badge the row carries. Review = what still wants a
+     person. Two questions, two controls, and they compose: AI Classified +
+     Needs review is every low-confidence call nobody has looked at yet. */
+  if(raw.lb==="ai" && r.dec) return false;
+  if(raw.lb==="human" && !(r.dec==="accepted"||r.dec==="corrected")) return false;
+  if(raw.lb==="excluded" && r.dec!=="rejected") return false;
+  if(raw.rv==="needreview" && !r.nr) return false;
+  if(raw.rv==="nolabel" && r.fc) return false;
+  if(raw.rv==="newcode" && !r.nc) return false;
+  if(raw.rv==="decided" && !r.dec) return false;
   return true;
 }
 document.querySelectorAll("[data-f]").forEach(el=>{
@@ -1503,12 +1512,12 @@ fetch("data/reviews.json").then(r=>r.json()).then(d=>{
   if(fcSel) Object.values(CATS).flat().forEach(o=>fcSel.insertAdjacentHTML("beforeend",`<option value="${esc(o.c)}">${esc(o.c)}</option>`));
   /* The counts come from the payload, not the markup: a hard-coded number in the
      template would silently rot the next time the classifier runs. */
-  const stSel=document.querySelector('[data-f="st"]');
-  if(stSel){
-    const o1=stSel.querySelector('option[value="nolabel"]');
-    const o2=stSel.querySelector('option[value="unsure"]');
+  const rvSel=document.querySelector('[data-f="rv"]');
+  if(rvSel){
+    const o1=rvSel.querySelector('option[value="nolabel"]');
+    const o2=rvSel.querySelector('option[value="needreview"]');
     if(o1) o1.textContent="No label ("+(KPI.nolabel||0).toLocaleString()+")";
-    if(o2) o2.textContent="AI was unsure ("+(KPI.needs_review||0).toLocaleString()+")";
+    if(o2) o2.textContent="Needs review ("+(KPI.needs_review||0).toLocaleString()+")";
   }
   window.__d=d;
   apply();
