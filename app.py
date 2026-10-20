@@ -548,9 +548,8 @@ def page(title, body, active="", msg="", err=False, ctx=None):
     def link(u, n):
         return f'<a href="{u}" class="snav{" on" if active == u else ""}">{n}</a>'
     nav = "".join(link(u, n) for u, n in
-                   [("/reviews", "Reviews"), ("/codes", "New codes"), ("/quality", "Quality")])
-    more = "".join(link(u, n) for u, n in
-                   [("/", "Dashboard"), ("/monthly", "Monthly"), ("/rules", "Rules")])
+                   [("/", "Overview"), ("/reviews", "Reviews"), ("/codes", "New codes"),
+                    ("/quality", "Quality"), ("/monthly", "Monthly"), ("/rules", "Rules")])
     flash = f'<div class="flash{" err" if err else ""}">{esc(msg)}</div>' if msg else ""
     who_html = ""
     if who:
@@ -565,7 +564,6 @@ def page(title, body, active="", msg="", err=False, ctx=None):
 <aside class="side">
   <div class="side-brand"><img class="mark" src="/static/logo-mark-light.png" alt="UEP" width="84" height="24"><span>Complaint validation</span></div>
   {nav}
-  <div class="side-sep"><span class="seplbl">More</span>{more}</div>
   <div class="side-foot">{who_html}</div>
 </aside>
 <main>{ctx.get("banner", "")}{flash}{body}</main>
