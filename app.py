@@ -217,6 +217,22 @@ tr:hover td{background:#fcfcff}
 .prod{font-weight:600}
 .title{color:var(--mut);font-size:12.5px;margin-top:2px;max-width:340px}
 form.filters{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-bottom:16px}
+/* Quick filters: the four questions a reviewer asks first, in front of the
+   select form instead of behind it. A chip is a link that carries every other
+   current filter, so it is a shortcut, not a replacement — the Label and Review
+   selects below still work, and bookmarks that name them still resolve. */
+.qf{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+a.qc{display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border-radius:999px;
+  border:1px solid var(--line);background:#fff;color:var(--ink);font-size:13px;font-weight:600;
+  white-space:nowrap;line-height:1.2}
+a.qc:hover{border-color:#c7d2fe;background:#f8faff;text-decoration:none}
+a.qc b{font-weight:700;color:var(--mut);font-variant-numeric:tabular-nums}
+a.qc.on{background:var(--accent);border-color:var(--accent);color:#fff}
+a.qc.on b{color:#fff}
+/* 0 is informative (this family has nothing waiting), so it stays on screen —
+   it just stops looking like a door worth opening. */
+a.qc.zero{opacity:.55}
+a.qc.on.zero{opacity:1}
 label{display:block;font-size:11.5px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
 input,select,textarea{padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:#fff;font:inherit;font-size:13.5px;min-width:130px}
 button{padding:8px 14px;border-radius:7px;border:1px solid var(--line);background:#fff;font:inherit;font-weight:600;cursor:pointer}
@@ -2965,6 +2981,46 @@ def p_reviews(cur, q, msg="", ctx=None):
         sku_echo = (f' · SKU {"containing" if q.get("skulike") == "1" else "exactly"} '
                     f'“{esc(q["sku"])}” matched {len(hit)} value'
                     f'{"s" if len(hit) != 1 else ""}: <span class="mono">{esc(vals)}{more}</span>')
+    # ---- quick filters ---------------------------------------------------
+    # The four doors a reader looks for first, in front of the select form
+    # instead of behind it. Each count is computed under the CURRENT filters
+    # minus the two dimensions a chip sets, so with family=Seat cushions the AI
+    # chip reads that family's rows, not the corpus total: a chip promising
+    # 22,228 and delivering 1,571 is worse than no chip at all. The selects keep
+    # their own global counts — they describe the corpus, the chips describe
+    # what this filter set would open.
+    qo = {k: v for k, v in q.items() if k not in ("page", "label", "review", "status")}
+    w0, a0 = build_where(qo)
+    cur.execute(f"""SELECT COALESCE(SUM(v.human_decision IS NULL),0) ai,
+                           COALESCE(SUM(v.human_decision IN ('accepted','corrected')),0) hu,
+                           COALESCE(SUM(v.needs_review=1),0) nr,
+                           COALESCE(SUM(v.final_complaint IS NULL),0) nl
+                      FROM v_ai_complaints v {w0}""", a0)
+    _qc = cur.fetchone()
+    # What counts as 'already active' has to match what build_where actually
+    # did, legacy ?status= included — otherwise a bookmarked URL shows no chip
+    # lit while the table is plainly filtered.
+    _alb, _arv = q.get("label") or "", q.get("review") or ""
+    if not (_alb or _arv):
+        _alb, _arv = _LEGACY_STATUS.get(q.get("status") or "", ("", ""))
+
+    def _qchip(lbl, n, dim, val):
+        """One chip: a link that sets this dimension and drops the other, so the
+        four answer one question each. Clicking the lit chip clears it."""
+        active = (_alb if dim == "label" else _arv) == val
+        qs = esc(qstr(qo, **{dim: "" if active else val}))
+        return (f'<a class="qc{" on" if active else ""}{" zero" if not n else ""}" '
+                f'href="{"/reviews?" + qs if qs else "/reviews"}" '
+                f'data-dim="{esc(dim)}" data-val="{esc(val)}" '
+                f'aria-pressed="{"true" if active else "false"}">'
+                f'{esc(lbl)} <b>{n:,}</b></a>')
+
+    quick = ('<div class="qf" role="group" aria-label="Quick filters">'
+             + _qchip("AI Classified", int(_qc["ai"]), "label", "ai")
+             + _qchip("Human Classified", int(_qc["hu"]), "label", "human")
+             + _qchip("Needs review", int(_qc["nr"]), "review", "needreview")
+             + _qchip("No label", int(_qc["nl"]), "review", "nolabel")
+             + "</div>")
     body = f"""<h1>Complaint records</h1>
 <p class="sub">{n:,} complaint records match — <b>{n_pr:,}</b> with a customer comment
   · <b>{n_co:,}</b> return-reason only · <b>{n_rv:,}</b> review text (the amazon feed){sku_echo}<br>
@@ -2972,6 +3028,7 @@ def p_reviews(cur, q, msg="", ctx=None):
   · <a href="/export.csv?{esc(qstr(q))}">export CSV</a>
   · <a href="/export.csv?{esc(qstr(q, text='1'))}">export with text</a>
   <br>Click any row to open that record here; SKU and ASIN open Amazon in a new tab.</p>
+{quick}
 <form class="filters" method="get">
   <div><label>Search text or title</label><input name="q" value="{esc(q.get('q',''))}" placeholder="seat cushion"></div>
   <div><label>Product family</label>{select('family', families, q.get('family'))}</div>

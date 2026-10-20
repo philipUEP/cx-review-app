@@ -473,6 +473,22 @@ button:hover{border-color:#cfd6e0}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .noapp{font-size:12px;color:var(--warn);max-width:230px;text-align:right;line-height:1.35}
 .filters{display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap;margin-top:20px}
+/* Quick filters: the four questions a reader asks first, between the title and
+   the select row. Each chip sets the matching Label/Review select below and
+   carries every other current filter, so it is a shortcut, not a replacement —
+   the selects keep working and keep their global corpus counts. */
+.quick{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 0}
+.qc{display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border-radius:999px;
+  border:1px solid var(--line);background:#fff;color:var(--ink);font-size:13px;font-weight:650;
+  white-space:nowrap;line-height:1.2}
+.qc:hover{border-color:#bfd3fe;background:#f7faff}
+.qc b{font-weight:700;color:var(--mut);font-variant-numeric:tabular-nums}
+.qc.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.qc.on b{color:#fff}
+/* 0 still means something ("nothing here is waiting"), so the chip stays and
+   only stops looking like a door worth opening. */
+.qc.zero{opacity:.55}
+.qc.on.zero{opacity:1}
 .f{display:flex;flex-direction:column;gap:5px;min-width:0}
 .f label{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--soft)}
 .f select,.f input{font:inherit;font-size:13px;padding:6px 9px;border:1px solid #dfe3e9;border-radius:7px;background:#fff;color:var(--ink);min-width:0;max-width:100%}
@@ -637,6 +653,7 @@ td.txt .prose{display:block;margin-top:2px}
         __APPCTA__
       </div>
     </div>
+    <div class="quick" id="quick" role="group" aria-label="Quick filters"></div>
     <div class="filters">
       <div class="f"><label for="famsel">Family</label>
         <select id="famsel" data-f="fam"><option value="">All product families</option>__FAMOPTIONS__</select></div>
@@ -773,6 +790,72 @@ document.getElementById("cards").addEventListener("click",e=>{
   apply();
   document.getElementById("table").scrollIntoView({behavior:"smooth",block:"start"});
 });
+
+/* ------------------------------------------------------- quick filters
+   Four chips between the title and the select row: the questions a reader asks
+   first should not require opening a dropdown. A chip sets one dimension of the
+   pair below and clears the other, so the four mean one thing each; clicking the
+   lit chip clears it. Every other filter is left exactly as it is. */
+const QCHIPS=[
+  {l:"AI Classified",   lb:"ai",    rv:""},
+  {l:"Human Classified",lb:"human", rv:""},
+  {l:"Needs review",    lb:"",      rv:"needreview"},
+  {l:"No label",        lb:"",      rv:"nolabel"}
+];
+function quickBox(){return document.getElementById("quick")}
+function quickCounts(raw){
+  /* Counted over every OTHER filter, with lb/rv dropped: a chip has to promise
+     the number it will actually deliver, so with a family selected it reads that
+     family's rows, never the corpus total. Same keepRow as the table, so the
+     number and the rows behind it cannot disagree. */
+  const base=Object.assign({},raw,{lb:"",rv:""});
+  const low=k=>(base[k]||"").toLowerCase();
+  let cut=0;
+  if(base.win){
+    const maxm=ROWS.reduce((m,r)=>Math.max(m,monthNum(r.mon)),0);
+    cut=maxm-(parseInt(base.win,10)-1);
+  }
+  const c={ai:0,human:0,needreview:0,nolabel:0};
+  ROWS.forEach(r=>{
+    if(!keepRow(r,base,low,cut,false)) return;
+    if(!r.dec) c.ai++;                                  /* no human decision   */
+    if(r.dec==="accepted"||r.dec==="corrected") c.human++;  /* a person decided */
+    if(r.nr) c.needreview++;
+    if(!r.fc) c.nolabel++;
+  });
+  return c;
+}
+function updateQuick(raw){
+  const box=quickBox(); if(!box) return;
+  const c=quickCounts(raw), q=raw||{};
+  QCHIPS.forEach(ch=>{
+    const b=box.querySelector('[data-lb="'+ch.lb+'"][data-rv="'+ch.rv+'"]'); if(!b) return;
+    const n=c[ch.lb||ch.rv]||0;
+    const on=ch.lb ? (q.lb||"")===ch.lb : (q.rv||"")===ch.rv;
+    b.querySelector("b").textContent=n.toLocaleString();
+    b.classList.toggle("on",on);
+    b.classList.toggle("zero",n===0);
+    b.setAttribute("aria-pressed",on?"true":"false");
+    b.title=(on?"clear ":"show ")+ch.l.toLowerCase()
+      +(ch.lb?": rows whose label comes from "+(ch.lb==="ai"?"the classifier":"a person")
+            :(ch.rv==="needreview"?": rows the classifier flagged as unsure"
+                                 :": rows with no complaint label at all"));
+  });
+}
+if(quickBox()){
+  quickBox().innerHTML=QCHIPS.map(c=>
+    `<button type="button" class="qc" data-lb="${c.lb}" data-rv="${c.rv}" aria-pressed="false">`+
+    `${c.l} <b>—</b></button>`).join("");
+  quickBox().addEventListener("click",e=>{
+    const b=e.target.closest("button.qc"); if(!b) return;
+    const lb=document.querySelector('[data-f="lb"]'), rv=document.querySelector('[data-f="rv"]');
+    if(!lb||!rv) return;
+    const on=b.classList.contains("on");
+    lb.value=on?"":b.dataset.lb;
+    rv.value=on?"":b.dataset.rv;
+    apply();
+  });
+}
 
 function esc(s){return (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
 function nfmt(n){return (n||0).toLocaleString()}
@@ -1461,6 +1544,9 @@ function apply(){
      preceding window to compare against in the disclosure. */
   MIXSCOPE=ROWS.filter(r=>keepRow(r,raw,low,cut,true));
   page=0; render();
+  /* The chips describe THIS filter set, so they are recomputed with the table,
+     not once at load. */
+  updateQuick(raw);
   if(cur) complaintOptions();
   updatePanels(raw);
 }
