@@ -69,14 +69,14 @@ CSS = r"""
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
 a{color:var(--accent);text-decoration:none}
 .wrap{display:flex;min-height:100vh}
-aside{width:218px;flex:0 0 218px;background:var(--card);border-right:1px solid var(--line);padding:16px 0;position:sticky;top:0;height:100vh;overflow:auto}
-.brand{display:flex;align-items:center;gap:8px;font-weight:750;font-size:17px;letter-spacing:-.02em;padding:0 18px 16px;border-bottom:1px solid var(--line);margin-bottom:10px}
+aside{width:208px;flex:0 0 208px;background:var(--card);border-right:1px solid var(--line);padding:24px 0;position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;letter-spacing:-.02em;padding:0 20px 18px;color:var(--ink)}
 .brand img.mark{height:24px;width:auto;display:block;flex:none}
-.brand span{display:block;font-size:10.5px;font-weight:600;color:var(--mut);letter-spacing:.08em;text-transform:uppercase;margin-top:2px}
-.grp{padding:10px 18px 4px;font-size:10.5px;font-weight:700;color:#9ca3af;letter-spacing:.08em;text-transform:uppercase}
-.nav{display:block;padding:7px 18px;color:#374151;font-size:13.5px;border-left:2px solid transparent}
-.nav:hover{background:#f9fafb}
-.nav.on{color:var(--accent);font-weight:650;background:#eff6ff;border-left-color:var(--accent)}
+.brand span{display:block;font-size:10px;font-weight:600;color:var(--mut);letter-spacing:.09em;text-transform:uppercase;margin-top:3px}
+.grp{padding:10px 20px 4px;font-size:10.5px;font-weight:700;color:#9ca3af;letter-spacing:.08em;text-transform:uppercase}
+.nav{display:block;padding:8px 20px;color:#374151;font-size:13.5px;border-left:2px solid transparent}
+.nav:hover{background:#fafbfc}
+.nav.on{color:var(--accent);font-weight:650;background:#f5f8ff;border-left-color:var(--accent)}
 .nav.off{color:#b6bcc6;cursor:default}
 main{flex:1;min-width:0;padding:20px 24px 60px}
 header.top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px}
@@ -136,6 +136,17 @@ tr.exrow td{background:#fbfcfe;border-bottom:1px solid var(--line);white-space:n
 .noapp{display:inline-block;font-weight:600;color:#92400e;font-size:12px}
 .ro{font-size:11px;color:var(--mut);font-weight:650;text-transform:uppercase;letter-spacing:.05em}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;background:#f3f4f6;padding:1px 4px;border-radius:4px;color:#374151}
+@media(max-width:760px){
+ .wrap{display:block}
+ aside{position:static;width:auto;flex:none;height:auto;display:flex;align-items:center;gap:2px;
+   padding:8px 10px;border-right:0;border-bottom:1px solid var(--line);overflow-x:auto}
+ .brand{padding:0 12px 0 4px;font-size:14px;white-space:nowrap}
+ .brand span{display:none}
+ .nav{padding:6px 10px;border-left:0;border-bottom:2px solid transparent;white-space:nowrap}
+ .nav.on{border-left:0;border-bottom-color:var(--accent)}
+ .grp{display:none}
+ main{padding:16px 14px 48px}
+}
 """
 
 SHELL = r"""<!doctype html><html><head><meta charset="utf-8">

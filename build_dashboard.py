@@ -233,7 +233,7 @@ def main():
         charset="utf8mb4", cursorclass=pymysql.cursors.DictCursor)
     cur = conn.cursor()
 
-    cur.execute("""SELECT review_id, review_date, sku, parent, product, asin, order_id,
+    cur.execute("""SELECT review_id, review_date, sku, parent, product, asin, title, order_id,
                           country, source, ai_complaint, ai_category,
                           final_complaint, final_category, second_complaint,
                           needs_review, is_new_code, has_prose, product_family,
@@ -365,6 +365,9 @@ def main():
             "s": r["sku"] or "", "p": r["parent"] or "", "pr": r["product"] or "",
             "fam": r["product_family"] or "",
             "a": r["asin"] or "", "o": r["order_id"] or "", "ct": r["country"] or "",
+            # The product title: the ASIN cell shows the ASIN, so the title has to
+            # travel with the payload to stay one hover away (and in the detail).
+            "ti": r["title"] or "",
             "src": r["source"] or "",
             "c": r["ai_complaint"] or "", "cat": r["ai_category"] or "",
             "fc": r["final_complaint"] or "", "fcat": r["final_category"] or "",
@@ -504,7 +507,15 @@ tbody tr:hover td{background:#fafcff}
 tbody tr.sel td{background:#f5f8ff}
 tbody tr.sel td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:#4b5563}
-td.txt{white-space:normal;min-width:320px;max-width:540px;line-height:1.45;color:#4b5563;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+td.txt{white-space:normal;min-width:320px;max-width:520px;line-height:1.45;color:#4b5563;cursor:pointer}
+/* Three lines, then an ellipsis on a line boundary. The old rule clamped the
+   <td> itself with display:-webkit-box, which fought the table layout and cut
+   words; the clamp lives on an inner block and the cell expands on click. */
+.rvclip{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
+td.txt.exp .rvclip{display:block;-webkit-line-clamp:unset;overflow:visible}
+td.txt .chip{margin-bottom:3px}
+a.lnk{color:var(--accent);text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:1px}
+a.lnk:hover{text-decoration-thickness:2px}
 .tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:10.5px;font-weight:650;border:1px solid #e5e7eb;background:#f7f8fa;color:#6b7280}
 .tag.auto{background:#f7f8fa;border-color:#e5e7eb;color:#6b7280}
 .tag.rev{background:#f2f7ff;border-color:#d7e3fb;color:#1d4ed8}
@@ -635,11 +646,11 @@ td.txt .prose{display:block;margin-top:2px}
     <div class="tblwrap">
       <table>
         <thead>
-          <tr><th>Status</th><th>Date</th><th>Product</th><th>SKU</th><th>Complaint</th><th>Review</th></tr>
+          <tr><th>Status</th><th>Date</th><th>ASIN</th><th>SKU</th><th>Complaint</th><th>Review</th></tr>
           <tr class="filterrow">
             <th><select data-f="st"><option value="">All reviews</option><option value="nr">Needs a human check</option><option value="nc">Uses a new code</option><option value="codeonly">No comment (code only)</option><option value="ok">Handled automatically</option><option value="done">Checked by the team</option></select></th>
             <th></th>
-            <th><input data-f="pr" placeholder="filter"></th>
+            <th><input data-f="a" placeholder="filter"></th>
             <th><input data-f="s" placeholder="filter"></th>
             <th><select data-f="fc"><option value="">All</option></select></th>
             <th></th>
@@ -745,14 +756,6 @@ function chipHtml(chips,limit){
   let h=shown.map(c=>`<span class="chip">${esc(c)}</span>`).join("");
   if(limit&&chips.length>shown.length) h+=`<span class="chip q">+${chips.length-shown.length}</span>`;
   return h;
-}
-function txtCell(r){
-  const p=parts(r.t);
-  const head=chipHtml(p.chips,2);
-  if(!p.prose.length)
-    return head+`<span class="prose" style="color:#6b7280">code only — nothing to check</span>`;
-  const s=p.prose.join(" ");
-  return head+`<span class="prose">${esc(s.slice(0,150))}${s.length>150?"…":""}</span>`;
 }
 function monthNum(m){return m?parseInt(m.slice(0,4),10)*12+parseInt(m.slice(5,7),10):0}
 function catsOf(rows){
@@ -1265,16 +1268,40 @@ function status(r){
   return '<span class="tag auto">automatic</span>';
 }
 
+function amzLink(href,text,tip){
+  return `<a class="lnk mono" href="${href}" target="_blank" rel="noopener"`+
+         ` data-ext="1" onclick="event.stopPropagation()"`+
+         (tip?` title="${esc(tip)}"`:"")+`>${esc(text)}</a>`;
+}
+function asinCell(r){
+  /* The column that used to read PRODUCT and show a short product code now
+     shows the ASIN, linked. Missing ASIN -> an em dash, never /dp/. */
+  if(!r.a) return "—";
+  return amzLink("https://www.amazon.com/dp/"+encodeURIComponent(r.a),r.a,r.ti||r.pr);
+}
+function skuCell(r){
+  if(!r.s) return "—";
+  return amzLink("https://www.amazon.com/s?k="+encodeURIComponent(r.s),r.s,r.ti||r.pr);
+}
+function txtCell(r){
+  const p=parts(r.t);
+  const head=chipHtml(p.chips,2);
+  /* Full prose in the DOM; CSS clamps it to three lines and the cell expands on
+     click. Slicing the string here is what used to cut words in half. */
+  const body=p.prose.length?`<span class="prose">${esc(p.prose.join(" "))}</span>`
+    :`<span class="prose" style="color:#6b7280">code only — nothing to check</span>`;
+  return `<div class="rvclip">${head}${body}</div>`;
+}
 function render(){
   const slice=VIEW.slice(page*PER,(page+1)*PER);
   document.getElementById("table").dataset.match=VIEW.length;
   document.getElementById("tb").innerHTML=slice.map(r=>`<tr data-id="${r.id}" class="${cur===r.id?'sel':''}">
     <td>${status(r)}</td>
     <td class="mono">${esc(r.d)}</td>
-    <td>${esc(r.pr)}</td>
-    <td>${esc(r.s)}</td>
+    <td class="mono">${asinCell(r)}</td>
+    <td class="mono">${skuCell(r)}</td>
     <td>${esc(nice(r.fc))||"—"}${r.hc&&r.hc!==r.c?'<span title="corrected from '+esc(r.c)+'">*</span>':''}</td>
-    <td class="txt">${txtCell(r)}</td></tr>`).join("")
+    <td class="txt" title="Click to read the full comment" onclick="event.stopPropagation();this.classList.toggle('exp')">${txtCell(r)}</td></tr>`).join("")
     || '<tr><td colspan="6" style="padding:34px;text-align:center;color:#6b7280">Nothing matches those filters.</td></tr>';
   document.getElementById("pinfo").textContent=`${VIEW.length.toLocaleString()} rows · page ${page+1} of ${Math.max(1,Math.ceil(VIEW.length/PER))}`;
   document.getElementById("prev").disabled=page===0;
@@ -1307,7 +1334,7 @@ function openRow(id){
   document.getElementById("dt").innerHTML=`${esc(r.s||r.pr||"Review")} ${status(r)}`
     +(r.hp?"":' <span class="tag blank">code only</span>');
   document.getElementById("dkv").innerHTML=[
-    ["ASIN",r.a],["Review ID",r.id],["Date",r.d],["SKU",r.s],["Product",r.pr],["Family",r.fam],["Parent",r.p],
+    ["ASIN",r.a],["Review ID",r.id],["Date",r.d],["SKU",r.s],["Product",r.pr],["Title",r.ti],["Family",r.fam],["Parent",r.p],
     ["Country",r.ct],["Source",r.src],["Order ID",r.o],["AI code",nice(r.c)],["AI category",r.cat],
     ["Validated",nice(r.fc)],["Validated category",r.fcat],["Second choice",nice(r.c2)]
   ].map(([k,v])=>`<div class="k">${k}</div><div class="v">${esc(v)||"—"}</div>`).join("");

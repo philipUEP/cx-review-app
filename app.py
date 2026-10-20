@@ -165,12 +165,30 @@ CSS = """
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 28px;display:flex;align-items:center;gap:26px;position:sticky;top:0;z-index:5;flex-wrap:wrap}
-header .brand{font-weight:650;letter-spacing:-.01em;display:flex;align-items:center;gap:9px}
-header .brand img.mark{height:26px;width:auto;display:block;flex:none}
-header nav a{color:var(--mut);font-weight:500;margin-right:18px}
-header nav a.on{color:var(--ink);font-weight:650}
-main{max-width:1240px;margin:0 auto;padding:26px 28px 60px}
+/* Left sidebar, matching the static site: same 208px rail, same brand block,
+   same link treatment. The static page is the reference for both surfaces. */
+.wrap{display:flex;min-height:100vh}
+aside.side{width:208px;flex:0 0 208px;background:var(--card);border-right:1px solid var(--line);
+  padding:24px 0;position:sticky;top:0;height:100vh;overflow:auto;display:flex;flex-direction:column}
+.side-brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;
+  letter-spacing:-.02em;padding:0 20px 18px;color:var(--ink)}
+.side-brand img.mark{height:24px;width:auto;display:block;flex:none}
+.side-brand span{display:block;font-size:10px;font-weight:600;color:#9ca3af;
+  letter-spacing:.09em;text-transform:uppercase;margin-top:3px}
+a.snav{display:block;padding:8px 20px;color:#374151;font-size:13.5px;
+  border-left:2px solid transparent;text-decoration:none}
+a.snav:hover{background:#fafbfc;text-decoration:none;color:#374151}
+a.snav.on{color:#2563eb;font-weight:650;background:#f5f8ff;border-left-color:#2563eb}
+.side-sep{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.side-sep .seplbl{display:block;padding:0 20px 4px;font-size:10px;font-weight:700;
+  letter-spacing:.09em;text-transform:uppercase;color:#9ca3af}
+.side-foot{margin-top:auto;padding:14px 20px 0;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--mut);line-height:1.6}
+.side-foot b{color:var(--ink)}
+.side-foot a{display:block;margin-top:5px;color:var(--mut);font-weight:600;
+  border-bottom:1px solid var(--line);width:max-content}
+.side-foot a:hover{color:var(--ink);text-decoration:none;border-bottom-color:var(--ink)}
+main{flex:1;min-width:0;max-width:1400px;margin:0;padding:26px 28px 60px}
 h1{font-size:22px;letter-spacing:-.02em;margin:0 0 4px}
 h2{font-size:15px;letter-spacing:-.01em;margin:26px 0 10px}
 .sub{color:var(--mut);margin:0 0 22px;font-size:13.5px}
@@ -264,6 +282,18 @@ td.open-cell a{color:inherit;text-decoration:none}
 a.lnk{color:var(--accent);text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:1px}
 a.lnk:hover{text-decoration-thickness:2px}
 
+/* ---------------------------------------------------------------- list text
+   The REVIEW cell is clamped to three lines and the cell itself opens the
+   record — the drawer has the full text. A hard character slice (the old
+   txt[:140]) cut mid-word with no way to read the rest; a line clamp ends on a
+   line boundary with an ellipsis and never hides content for good. */
+td.rv{min-width:300px;max-width:520px;cursor:pointer}
+.rvclip{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;
+  white-space:normal;line-height:1.45;font-size:13px;color:#4b5563}
+.rvclip .chip{margin-top:1px}
+.rvprose{display:inline}
+.rvprose.none{color:#9d174d}
+
 /* ---------------------------------------------------------------- drawer
    One panel, 620px, its own scroll, over a dimmed backdrop. It replaces the
    navigation to a second tab: the table stays behind it and the URL stays put. */
@@ -317,6 +347,32 @@ body.drw-open{overflow:hidden}
 .kv dt{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);padding-top:2px}
 .kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
 @media(max-width:680px){.drw{max-width:100%}.drw-body{padding:18px 16px 32px}}
+/* Under 900px the rail becomes a top bar, exactly as the static page does it:
+   the same six links in one scrolling row, brand left, Sign out right. */
+@media(max-width:900px){
+  .wrap{display:block}
+  aside.side{position:static;width:auto;flex:none;height:auto;flex-direction:row;align-items:center;
+    gap:2px;padding:8px 10px;border-right:0;border-bottom:1px solid var(--line);overflow-x:auto}
+  .side-brand{padding:0 12px 0 4px;gap:7px;white-space:nowrap;flex:none}
+  .side-brand span{display:none}
+  a.snav{padding:6px 10px;border-left:0;border-bottom:2px solid transparent;white-space:nowrap;flex:none}
+  a.snav.on{border-left:0;border-bottom-color:var(--accent);background:transparent}
+  .side-sep{margin:0;padding:0;border:0;display:contents}
+  .side-sep .seplbl{display:none}
+  .side-foot{margin:0 0 0 auto;padding:0 4px 0 8px;border:0;white-space:nowrap;flex:none;font-size:11.5px}
+  .side-who{display:none}
+  .side-foot a{display:inline;margin:0;border:0}
+  main{padding:18px 16px 48px}
+  /* Narrow screens: nothing may push the body wider than the viewport. Native
+     selects size to their longest option, and the mix table sized to content;
+     both are bounded here rather than left to overflow the page. */
+  form.filters>div{flex:1 1 140px;min-width:0}
+  form.filters select,form.filters input{min-width:0;width:100%;max-width:100%}
+  .mix{overflow:hidden}
+  .mixgrid{grid-template-columns:minmax(0,1fr)}
+  .mixtbl{table-layout:fixed;width:100%}
+  .mixtbl td.c{max-width:none;white-space:normal}
+}
 """
 
 
@@ -419,7 +475,7 @@ DRAWER_JS = """<script>
     var tr = ev.target.closest && ev.target.closest('tr.rowlink');
     if (!tr) return;
     var a = ev.target.closest('a');
-    if (a && !a.classList.contains('rowopen')) return;   // Amazon links win
+    if (a && !a.classList.contains('rowopen')) { ev.stopPropagation(); return; }  // Amazon links win
     ev.preventDefault();
     var id = tr.getAttribute('data-review-id');
     if (id && id !== curId) open(id);
@@ -485,19 +541,35 @@ def esc(s):
 def page(title, body, active="", msg="", err=False, ctx=None):
     ctx = ctx or {}
     who = ctx.get("who")
-    nav = "".join(
-        f'<a href="{u}" class="{"on" if active == u else ""}">{n}</a>'
-        for u, n in [("/", "Dashboard"), ("/reviews", "Complaint records"), ("/monthly", "Monthly"),
-                     ("/rules", "Rules"), ("/codes", "New codes"), ("/quality", "Quality")])
+    # The three primary links are the static site's sidebar, in its order and
+    # with its styling: the two surfaces are one product and must not look like
+    # two. Dashboard/Monthly/Rules are app-only pages, so they sit below a
+    # separator instead of pushing Reviews off the top.
+    def link(u, n):
+        return f'<a href="{u}" class="snav{" on" if active == u else ""}">{n}</a>'
+    nav = "".join(link(u, n) for u, n in
+                   [("/reviews", "Reviews"), ("/codes", "New codes"), ("/quality", "Quality")])
+    more = "".join(link(u, n) for u, n in
+                   [("/", "Dashboard"), ("/monthly", "Monthly"), ("/rules", "Rules")])
     flash = f'<div class="flash{" err" if err else ""}">{esc(msg)}</div>' if msg else ""
-    who_html = (f'<span class="who">signed in as <b>{esc(who["name"])}</b>'
-                f'{" (uid " + str(who["uid"]) + ")" if who.get("uid") else ""}'
-                f'<a href="/logout">Sign out</a></span>') if who else ""
+    who_html = ""
+    if who:
+        ident = f'signed in as <b>{esc(who["name"])}</b>'
+        if who.get("uid"):
+            ident += f' · uid {who["uid"]}'
+        who_html = f'<div class="side-who">{ident}</div><a href="/logout">Sign out</a>'
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · AI Complaint Validation</title><style>{CSS}{ctx.get("css", "")}</style></head>
-<body><header><span class="brand"><img class="mark" src="/static/logo-mark-light.png" alt="UEP" width="91" height="26">AI Complaint Validation</span><nav>{nav}</nav>{who_html}</header>
+<body><div class="wrap">
+<aside class="side">
+  <div class="side-brand"><img class="mark" src="/static/logo-mark-light.png" alt="UEP" width="84" height="24"><span>Complaint validation</span></div>
+  {nav}
+  <div class="side-sep"><span class="seplbl">More</span>{more}</div>
+  <div class="side-foot">{who_html}</div>
+</aside>
 <main>{ctx.get("banner", "")}{flash}{body}</main>
+</div>
 {ctx.get("scripts", "")}</body></html>"""
 
 
@@ -561,6 +633,20 @@ def text_snippet(t, n=140):
     else:
         body = '<span class="meta" style="color:#9d174d">code only — nothing to check</span>'
     return head + (f'<br>{body}' if head else body)
+
+
+def text_clip(t):
+    """The list cell: chips above the FULL comment, clamped by CSS to three
+    lines. No character slice here — slicing is what cut words in half and left
+    the reader no way to see the rest. Clicking the cell opens the drawer,
+    which repeats it unclamped."""
+    chips, prose = text_parts(t)
+    head = chips_html(chips, limit=2)
+    if prose:
+        body = f'<span class="rvprose">{esc(" ".join(prose))}</span>'
+    else:
+        body = '<span class="rvprose none">code only — nothing to check</span>'
+    return f'<div class="rvclip">{head}{body}</div>'
 
 
 # ---------------------------------------------------------------- refresh health
@@ -711,18 +797,24 @@ def canonical(cur, c):
     return taxonomy(cur).get(norm(c), c)
 
 
-def amz_asin(asin):
+def amz_asin(asin, title=""):
+    """The ASIN, linked to its Amazon detail page. The product title rides in the
+    tooltip: the column no longer carries a title line, but the title must stay
+    one hover away. No ASIN -> an em dash, never a link to /dp/."""
     if not asin:
         return "—"
+    tip = f' title="{esc(title.strip())}"' if (title or "").strip() else ""
     return (f'<a href="{AMZ_DP}{urllib.parse.quote(asin)}" target="_blank" '
-            f'rel="noopener" class="mono lnk" data-ext="1">{esc(asin)}</a>')
+            f'rel="noopener" class="mono lnk" data-ext="1" onclick="event.stopPropagation()"'
+            f'{tip}>{esc(asin)}</a>')
 
 
 def amz_sku(sku):
     if not sku:
         return "—"
     return (f'<a href="{AMZ_SKU_SEARCH}{urllib.parse.quote(sku)}" target="_blank" '
-            f'rel="noopener" class="mono lnk" data-ext="1">{esc(sku)}</a>')
+            f'rel="noopener" class="mono lnk" data-ext="1" onclick="event.stopPropagation()">'
+            f'{esc(sku)}</a>')
 
 
 def short_title(t, n=90):
@@ -2671,12 +2763,11 @@ def p_reviews(cur, q, msg="", ctx=None):
         # no-JS path to the same review, never a second tab for a JS user.
         trs.append(f"""<tr class="rowlink" data-review-id="{rid}" tabindex="0">
           <td class="mono">{esc(r["review_date"])}</td>
-          <td>{product_cell(r)}</td>
+          <td class="mono">{amz_asin(r["asin"], r["title"])}</td>
           <td class="mono">{esc(r["parent"] or "—")}</td>
           <td>{amz_sku(r["sku"])}</td>
-          <td>{amz_asin(r["asin"])}</td>
           <td>{label}<br>{pill}</td>
-          <td class="meta" style="min-width:300px">{text_snippet(r["txt"])}</td>
+          <td class="rv" title="Click to read the full comment">{text_clip(r["txt"])}</td>
           <td class="open-cell"><a class="rowopen" href="/review/{rid}">open<span class="chev">›</span></a></td></tr>""")
 
     products = options(cur, "SELECT product k, COUNT(*) n FROM v_ai_complaints WHERE product IS NOT NULL GROUP BY product ORDER BY n DESC")
@@ -2745,9 +2836,9 @@ def p_reviews(cur, q, msg="", ctx=None):
   <div><a href="/reviews">clear</a></div>
 </form>
 {mix_block(cur, q, n)}
-<div class="card"><table><thead><tr><th>Date</th><th>Product</th><th>Parent</th><th>SKU</th><th>ASIN</th>
+<div class="card"><table><thead><tr><th>Date</th><th>ASIN</th><th>Parent</th><th>SKU</th>
 <th>Complaint</th><th>Comment</th><th></th></tr></thead>
-<tbody>{''.join(trs) or '<tr><td colspan="8" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
+<tbody>{''.join(trs) or '<tr><td colspan="7" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
 <div class="pager">{f'<a href="/reviews?{esc(qstr(q, page=pg-1))}">← previous</a>' if pg > 1 else ''}
   <span class="sp">page {pg}</span>
   {f'<a href="/reviews?{esc(qstr(q, page=pg+1))}">next →</a>' if off + PAGE_SIZE < n else ''}</div>
