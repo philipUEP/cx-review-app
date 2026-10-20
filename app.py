@@ -3053,7 +3053,6 @@ def p_reviews(cur, q, msg="", ctx=None):
   <div><button class="primary">Filter</button></div>
   <div><a href="/reviews">clear</a></div>
 </form>
-{mix_block(cur, q, n)}
 <div class="card"><table><thead><tr><th>Date</th><th>ASIN</th><th>Parent</th><th>SKU</th>
 <th>Complaint</th><th>Comment</th><th></th></tr></thead>
 <tbody>{''.join(trs) or '<tr><td colspan="7" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
