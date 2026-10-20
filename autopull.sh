@@ -14,8 +14,8 @@ flock -n 9 || exit 0        # another run is mid-deploy; skip quietly
 
 cd "$REPO"
 
-if ! git fetch -q origin main; then
-  echo "$(date -Is) fetch failed (network or credentials) — nothing changed" >> "$LOG"
+if ! git fetch -q origin main 2>>"$LOG"; then
+  echo "$(date -Is) fetch failed — the git error is logged above (ownership, network or credentials)" >> "$LOG"
   exit 0
 fi
 
