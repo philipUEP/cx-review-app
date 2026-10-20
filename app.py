@@ -216,11 +216,30 @@ tr:hover td{background:#fcfcff}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
 .prod{font-weight:600}
 .title{color:var(--mut);font-size:12.5px;margin-top:2px;max-width:340px}
-form.filters{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-bottom:16px}
+/* The filter form: one row of the questions a reader asks first, and a
+   disclosure for the rest. It used to be thirteen controls in one flat grid, in
+   no order, with Label and Review duplicating the chips directly above it — the
+   grid was the reason none of it read as a filter. */
+form.filters{margin-bottom:16px}
+.frow{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+.frow>div{min-width:0}
+/* the two text boxes get the space; the picklists stay as wide as they need */
+.frow .fq{flex:1 1 220px}
+.frow .fsku{flex:0 1 260px}
+.skuroll{display:flex;gap:6px;align-items:center;min-width:0}
+.skuroll input{flex:1 1 110px;min-width:0}
+.skuroll select{flex:0 0 auto;min-width:0}
+details.fmore{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}
+details.fmore summary{cursor:pointer;display:inline-block;font-size:12.5px;font-weight:650;
+  color:var(--accent);padding:3px 0}
+details.fmore summary:hover{text-decoration:underline}
+details.fmore summary::marker{color:var(--mut)}
+details.fmore[open] summary{margin-bottom:10px}
+details.fmore .frow{gap:10px}
 /* Quick filters: the four questions a reviewer asks first, in front of the
    select form instead of behind it. A chip is a link that carries every other
-   current filter, so it is a shortcut, not a replacement — the Label and Review
-   selects below still work, and bookmarks that name them still resolve. */
+   current filter, and it is now the ONLY control for those two dimensions —
+   bookmarks that name them still resolve. */
 .qf{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
 a.qc{display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border-radius:999px;
   border:1px solid var(--line);background:#fff;color:var(--ink);font-size:13px;font-weight:600;
@@ -388,8 +407,10 @@ body.drw-open{overflow:hidden}
   /* Narrow screens: nothing may push the body wider than the viewport. Native
      selects size to their longest option, and the mix table sized to content;
      both are bounded here rather than left to overflow the page. */
-  form.filters>div{flex:1 1 140px;min-width:0}
+  form.filters .frow>div{flex:1 1 140px;min-width:0}
   form.filters select,form.filters input{min-width:0;width:100%;max-width:100%}
+  /* the SKU match select sits beside its input, so it may not take a full row */
+  form.filters .skuroll select{width:auto;flex:0 0 auto}
   .mix{overflow:hidden}
   .mixgrid{grid-template-columns:minmax(0,1fr)}
   .mixtbl{table-layout:fixed;width:100%}
@@ -2951,20 +2972,12 @@ def p_reviews(cur, q, msg="", ctx=None):
         merged[lbl] = merged.get(lbl, 0) + cnt
     complaints = sorted(merged.items(), key=lambda kv: -kv[1])
 
-    # The counts on the two review options are GLOBAL, not scoped to the current
-    # filter: 'No label (41)' must read as a fact about the corpus, not drift
-    # every time someone narrows a date range.
-    cur.execute("""SELECT COALESCE(SUM(final_complaint IS NULL),0) nl,
-                          COALESCE(SUM(needs_review=1),0) un
-                     FROM v_ai_complaints""")
-    _sc = cur.fetchone()
-    nl_n, un_n = int(_sc["nl"]), int(_sc["un"])
-    # Two controls, not one: 'Label' answers whose badge a row carries, 'Review'
-    # answers what still wants a person. Neither value appears in both, so a
-    # chosen pair always means one thing.
-    review_counts = {"needreview": un_n, "nolabel": nl_n}
-    label_sel = _opt_select("label", LABEL_OPTS, q.get("label"))
-    review_sel = _opt_select("review", REVIEW_OPTS, q.get("review"), counts=review_counts)
+    # Label and Review used to be two more selects here, printed directly below
+    # the chips that already set exactly those two dimensions: the same two
+    # questions, answered twice, in two vocabularies, 20px apart. The chips above
+    # are now the only control for them. ?label= and ?review= still filter
+    # (build_where reads both) and still light their chip, so bookmarks and the
+    # export links keep working.
     # The complaint dropdown keeps the stored value (it is a filter, so it must
     # match the column) and only changes what it reads as.
     complaint_select = select('complaint', [(k, display_label(k, cur), n) for k, n in complaints],
@@ -3021,6 +3034,16 @@ def p_reviews(cur, q, msg="", ctx=None):
              + _qchip("Needs review", int(_qc["nr"]), "review", "needreview")
              + _qchip("No label", int(_qc["nl"]), "review", "nolabel")
              + "</div>")
+    # ---- secondary filters ------------------------------------------------
+    # Parent, Product name, Country, Source and Text are real filters, but they
+    # are the second question, not the first: behind one disclosure instead of in
+    # the same row as Search. If any of them is set the disclosure renders OPEN
+    # and says how many, because a filtered view that hides its own constraint is
+    # how a wrong number gets explained for an hour.
+    more_keys = ("parent", "product", "country", "source", "tx")
+    more_active = sum(1 for k in more_keys if (q.get(k) or "").strip())
+    more_open = " open" if more_active else ""
+    more_label = f"More filters ({more_active} active)" if more_active else "More filters"
     body = f"""<h1>Complaint records</h1>
 <p class="sub">{n:,} complaint records match — <b>{n_pr:,}</b> with a customer comment
   · <b>{n_co:,}</b> return-reason only · <b>{n_rv:,}</b> review text (the amazon feed){sku_echo}<br>
@@ -3029,29 +3052,42 @@ def p_reviews(cur, q, msg="", ctx=None):
   · <a href="/export.csv?{esc(qstr(q, text='1'))}">export with text</a>
   <br>Click any row to open that record here; SKU and ASIN open Amazon in a new tab.</p>
 {quick}
-<form class="filters" method="get">
-  <div><label>Search text or title</label><input name="q" value="{esc(q.get('q',''))}" placeholder="seat cushion"></div>
-  <div><label>Product family</label>{select('family', families, q.get('family'))}</div>
-  <div><label>Product / title</label><input name="product" value="{esc(q.get('product',''))}" placeholder="SC-B or sitzkissen"></div>
-  <div><label>Parent</label>{select('parent', parents, q.get('parent'))}</div>
-  <div><label>SKU</label><input name="sku" value="{esc(q.get('sku',''))}" placeholder="6 or SC-B-IR">
-    <label style="text-transform:none;letter-spacing:0;font-weight:500;margin-top:4px">
-      <input type="checkbox" name="skulike" value="1" style="min-width:0;margin:0 4px 0 0"
-        {"checked" if q.get("skulike")=="1" else ""}>contains (default: exact)</label></div>
-  <div><label>Complaint</label>{complaint_select}</div>
-  <div><label>Source</label>{select('source', sources, q.get('source'))}</div>
-  <div><label>Country</label>{select('country', countries, q.get('country'))}</div>
-  <div><label for="labelsel">Label</label>{label_sel}</div>
-  <div><label for="reviewsel">Review</label>{review_sel}</div>
-  <div><label>Text</label><select name="tx">
-    <option value="">Any</option>
-    <option value="prose"{" selected" if q.get("tx")=="prose" else ""}>Has a customer comment</option>
-    <option value="codeonly"{" selected" if q.get("tx")=="codeonly" else ""}>Code only (not checkable)</option>
-  </select></div>
-  <div><label>From</label><input type="date" name="from" value="{esc(q.get('from',''))}"></div>
-  <div><label>To</label><input type="date" name="to" value="{esc(q.get('to',''))}"></div>
-  <div><button class="primary">Filter</button></div>
-  <div><a href="/reviews">clear</a></div>
+<form class="filters" method="get" action="/reviews">
+  <div class="frow">
+    <div class="fq"><label for="fq">Search everywhere</label>
+      <input id="fq" name="q" value="{esc(q.get('q',''))}" placeholder="e.g. leak, cushion"
+        title="Looks in the customer's words, the product title, the SKU and the product code"></div>
+    <div><label>Product family</label>{select('family', families, q.get('family'))}</div>
+    <div class="fsku"><label for="fsku">SKU</label>
+      <div class="skuroll">
+        <input id="fsku" name="sku" value="{esc(q.get('sku',''))}" placeholder="e.g. SC-B-IR or an order number">
+        <select name="skulike" aria-label="SKU match">
+          <option value=""{" selected" if q.get("skulike") != "1" else ""}>exact match</option>
+          <option value="1"{" selected" if q.get("skulike") == "1" else ""}>partial match</option>
+        </select>
+      </div></div>
+    <div><label>Complaint</label>{complaint_select}</div>
+    <div><label for="ffrom">From</label><input id="ffrom" type="date" name="from" value="{esc(q.get('from',''))}"></div>
+    <div><label for="fto">To</label><input id="fto" type="date" name="to" value="{esc(q.get('to',''))}"></div>
+    <div><button class="primary">Filter</button></div>
+    <div><a href="/reviews">clear</a></div>
+  </div>
+  <details class="fmore"{more_open}>
+    <summary>{more_label}</summary>
+    <div class="frow">
+      <div><label>Parent</label>{select('parent', parents, q.get('parent'))}</div>
+      <div><label for="fproduct">Product name</label>
+        <input id="fproduct" name="product" value="{esc(q.get('product',''))}" placeholder="e.g. SC-B or seat cushion"
+          title="Matches the product code or any word in the product title"></div>
+      <div><label>Country</label>{select('country', countries, q.get('country'))}</div>
+      <div><label>Source</label>{select('source', sources, q.get('source'))}</div>
+      <div><label>Text</label><select name="tx">
+        <option value="">Any</option>
+        <option value="prose"{" selected" if q.get("tx")=="prose" else ""}>Has a customer comment</option>
+        <option value="codeonly"{" selected" if q.get("tx")=="codeonly" else ""}>Code only (not checkable)</option>
+      </select></div>
+    </div>
+  </details>
 </form>
 <div class="card"><table><thead><tr><th>Date</th><th>ASIN</th><th>Parent</th><th>SKU</th>
 <th>Complaint</th><th>Comment</th><th></th></tr></thead>
