@@ -208,8 +208,8 @@ tr:hover td{background:#fcfcff}
 .pill.ok{background:#ecfdf3;border-color:#abefc6;color:var(--ok)}
 .pill.bad{background:#fef3f2;border-color:#fecdca;color:var(--bad)}
 /* Provenance: WHO produced the label this row reports as. Distinct from the
-   status pill beside it, which says WHETHER the row has been looked at — a row
-   can be 'automatic' and AI-classified, or 'confirmed' and human-classified. */
+   status pill beside it, which appears only when the row has NO label — a
+   labelled row can be AI-classified or human-classified and carries no status. */
 .pill.prov{background:#f4f4f5;border-color:#e4e4e7;color:#52525b}
 .pill.prov.human{background:#eef3ff;border-color:#c9d9f8;color:#1d4ed8}
 .pill.prov.excl{background:#fdf3f2;border-color:#f2d3cf;color:#a4504a}
@@ -881,12 +881,17 @@ def build_where(q):
     if q.get("to"):
         where.append("v.review_date <= %s"); args.append(q["to"])
     st = q.get("status") or ""
-    if st == "new":
-        where.append("v.human_validated=0")
+    if st in ("nolabel", "new"):
+        # The ONLY state that is waiting for a person: no label at all, because
+        # the classifier could not read a complaint here. Legitimate: rows the AI
+        # labelled — confident or not — are finished work, not a queue.
+        where.append("v.final_complaint IS NULL")
     elif st == "decided":
         where.append("v.human_validated=1")
-    elif st == "flagged":
-        where.append("v.needs_review=1 AND v.human_validated=0")
+    elif st in ("unsure", "flagged"):
+        # Confidence, not a queue. These rows all carry a label; the filter exists
+        # so anyone auditing the classifier can reach its low-confidence calls.
+        where.append("v.needs_review=1")
     elif st == "newcode":
         where.append("v.is_new_code=1")
     elif st == "ai":
@@ -2430,10 +2435,15 @@ def p_dashboard(cur, q, msg="", ctx=None):
     h = cur.fetchone()
     total, no_prose, validated = int(h["c"]), int(h["np"]), int(h["hv"])
     lo, hi = h["lo"], h["hi"]
-    cur.execute(f"""SELECT COUNT(*) c, COALESCE(SUM(v.has_prose=0),0) np
-                      FROM v_ai_complaints v {w_and}v.human_validated=0 AND v.needs_review=1""", args)
-    h = cur.fetchone()
-    nr, nr_co = int(h["c"]), int(h["np"])
+    cur.execute(f"""SELECT COALESCE(SUM(v.has_prose=0),0) np
+                      FROM v_ai_complaints v {w_and}v.needs_review=1""", args)
+    nr_co = int(cur.fetchone()["np"])
+    # The one genuine backlog: rows with NO label at all. It is a different
+    # question from needs_review (the confidence signal), and conflating the two
+    # is what put 2,155 already-labelled rows in front of a person as work.
+    cur.execute(f"""SELECT COALESCE(SUM(v.final_complaint IS NULL),0) c
+                      FROM v_ai_complaints v {w}""", args)
+    unlab = int(cur.fetchone()["c"])
     cur.execute("SELECT COUNT(*) c FROM proposed_codes WHERE status='pending'")
     pend = int(cur.fetchone()["c"])
     # DISTINCT review_id, not COUNT(*): a revised decision adds a row, and
@@ -2562,8 +2572,10 @@ def p_dashboard(cur, q, msg="", ctx=None):
     rec_href = f"/reviews?{rec_qs}" if rec_qs else "/reviews"
     cards = [
         (total, "complaint records", "all sources and families", rec_href),
-        (nr, "need a human check", f"unreviewed and flagged · {nr_co:,} code only",
-         f"/reviews?{esc(qstr(fq, status='flagged'))}"),
+        # Unclassified, in the position the review queue used to hold: a row only
+        # waits for a person when the AI produced no label for it.
+        (unlab, "unclassified", "no label — the AI could not read a complaint",
+         f"/reviews?{esc(qstr(fq, status='nolabel'))}"),
         (pend, "codes awaiting a decision", "not in the complaint list yet", "/codes"),
         (corr, "decisions recorded", "confirmed, corrected or removed",
          f"/reviews?{esc(qstr(fq, status='decided'))}"),
@@ -2685,7 +2697,7 @@ in the mix{"; Review Deletion is a further distinct label, counted only as proce
 <p><b>Feed coverage.</b> {feed_txt}</p>
 <p><b>Picklist-only records.</b> <b>{no_prose:,}</b> of <b>{total:,}</b> rows carry no customer
 comment; they hold the return-reason picklist only, so no label on them can be checked against what
-a customer wrote (<b>{nr_co:,}</b> of them are still unreviewed).</p>
+a customer wrote (<b>{nr_co:,}</b> of them carry a low-confidence label).</p>
 <p><b>What the rate is.</b> {rate_txt}</p>
 <p><b>Validation status.</b> <b>{validated:,}</b> of <b>{total:,}</b> records have a decision
 recorded in this app so far — each record counts once, however many times its decision was revised. The labels themselves were validated before launch: the CX team has
@@ -2693,15 +2705,17 @@ recorded in this app so far — each record counts once, however many times its 
 check of this AI put agreement at 83.6%. Figures and the mix use the corrected label where one
 exists, and the AI’s own label stays on each row for audit.</p>
 <p><b>Label source.</b> <b>{human_n:,}</b> {human_word} a human label, <b>{ai_n:,}</b> carry the
-AI’s{excl_txt}. The badge on each row says which of those is being reported; the status pill beside
-it says whether anyone has looked at the row yet, which is a different question.</p>
+AI’s{excl_txt}. The badge on each row says which of those is being reported; the status tag, where
+one appears, marks a row with no label at all — a different question.</p>
 <p><b>Process noise.</b> <b>{noise:,}</b> records are Review Deletion — a rule verdict on empty or
 non-complaint text, not a complaint. They stay in the records table and the CSV; the mix counts them
 only so the totals reconcile.</p>
-<p><b>Status labels.</b> <b>automatic</b> — the AI was confident and used a code you already have ·
-<b>needs check</b> — it wasn't sure, so a person should confirm · <b>new code</b> — it used a
-complaint type that isn't in your list yet · <b>confirmed / corrected / removed</b> — someone has
-already decided.</p>
+<p><b>Status labels.</b> The classifier labels every row it can read, and a labelled row carries no
+status tag — the label is finished work, not a flag. <b>unclassified</b> — no label at all, so that
+is the only row waiting for a person · <b>new code</b> — it used a complaint type that isn't in your
+list yet · <b>confirmed / corrected / removed</b> — someone has already decided. Low confidence is
+not a queue: those rows are labelled, and the signal stays reachable through the 'AI was unsure'
+filter for anyone auditing it.</p>
 </div></details>"""
 
     body = f"""<div class="dash">
@@ -2761,7 +2775,7 @@ def provenance(dec):
     """WHO produced the label this record reports as.
 
     Deliberately not the same question as the status pill beside it: that one
-    says whether a person has looked at the row, this one says whose label is
+    appears only when a row has no label at all, this one says whose label is
     the one being counted. 'rejected' is its own value because those records
     leave complaint reporting altogether — neither label is being reported.
     """
@@ -2817,10 +2831,13 @@ def p_reviews(cur, q, msg="", ctx=None):
             pill = '<span class="pill bad" data-pill>not a complaint</span>'
         elif r["is_new_code"]:
             pill = '<span class="pill new" data-pill>new code</span>'
-        elif r["needs_review"]:
-            pill = '<span class="pill bad" data-pill>needs check</span>'
+        elif not (r["final_complaint"] or "").strip():
+            # The only row that is waiting for a person: nothing was labelled.
+            pill = '<span class="pill bad" data-pill>unclassified</span>'
         else:
-            pill = '<span class="pill" data-pill>unreviewed</span>'
+            # Labelled by the classifier — including its low-confidence calls.
+            # No status tag: the work is done, so there is nothing to flag.
+            pill = ""
         # Both sides of a correction go through the taxonomy spelling, so the row
         # never shows two casings of one code side by side.
         if r["human_decision"] == "corrected" and r["ai_complaint"]:
@@ -2855,14 +2872,26 @@ def p_reviews(cur, q, msg="", ctx=None):
         merged[lbl] = merged.get(lbl, 0) + cnt
     complaints = sorted(merged.items(), key=lambda kv: -kv[1])
 
+    # The counts on the two status options are GLOBAL, not scoped to the current
+    # filter: 'No label (41)' must read as a fact about the corpus, not drift
+    # every time someone narrows a date range.
+    cur.execute("""SELECT COALESCE(SUM(final_complaint IS NULL),0) nl,
+                          COALESCE(SUM(needs_review=1),0) un
+                     FROM v_ai_complaints""")
+    _sc = cur.fetchone()
+    nl_n, un_n = int(_sc["nl"]), int(_sc["un"])
     statuses = "".join(f'<option value="{v}"{" selected" if q.get("status")==v else ""}>{lbl}</option>'
-                       for v, lbl in [("new", "Unreviewed"), ("flagged", "Flagged, unreviewed"),
+                       for v, lbl in [("nolabel", f"No label ({nl_n:,})"),
                                       ("decided", "Decided"), ("newcode", "New code"),
                                       # Provenance rides in the same control: one dropdown,
                                       # because a second one beside it would filter the same
                                       # column and the two could contradict each other.
                                       ("ai", "AI Classified"), ("human", "Human Classified"),
-                                      ("excluded", "Excluded")])
+                                      ("excluded", "Excluded"),
+                                      # Last, deliberately: confidence is a question an
+                                      # auditor asks, not a queue anyone is expected to
+                                      # work. The rows behind it all carry a label.
+                                      ("unsure", f"AI was unsure ({un_n:,})")])
     # The complaint dropdown keeps the stored value (it is a filter, so it must
     # match the column) and only changes what it reads as.
     complaint_select = select('complaint', [(k, display_label(k, cur), n) for k, n in complaints],

@@ -354,6 +354,10 @@ def main():
             "fba": sum(1 for r in rows if (r["source"] or "") == "fba"),
             "amazon": sum(1 for r in rows if (r["source"] or "") == "amazon"),
             "needs_review": sum(1 for r in rows if r["needs_review"]),
+            # The only genuine backlog on this page: rows carrying no label.
+            # Distinct from needs_review, which is a confidence signal on rows the
+            # classifier DID label.
+            "nolabel": sum(1 for r in rows if not (r["final_complaint"] or "").strip()),
             "new_code": sum(1 for r in rows if r["is_new_code"]),
             "pending_codes": pend,
             "corrections": corr,
@@ -539,8 +543,8 @@ a.lnk:hover{text-decoration-thickness:2px}
 .tag.new{background:#f4f4f5;border-color:#e4e4e7;color:#3f3f46}
 .tag.ok{background:#f7f8fa;border-color:#e5e7eb;color:#374151}
 .tag.blank{background:#f7f8fa;border-color:#e5e7eb;color:#9ca3af}
-/* Provenance badge: WHO produced the label being reported, beside the status
-   tag that says WHETHER the row has been looked at. Two questions, two chips. */
+/* Provenance badge: WHO produced the label being reported. It is the only chip a
+   labelled row shows — a status tag appears only when the row has no label. */
 .tag.prov{background:#f4f4f5;border-color:#e4e4e7;color:#52525b;font-weight:600}
 .tag.prov.human{background:#eef3ff;border-color:#c9d9f8;color:#1d4ed8}
 .tag.prov.excl{background:#fdf3f2;border-color:#f2d3cf;color:#a4504a}
@@ -671,7 +675,7 @@ td.txt .prose{display:block;margin-top:2px}
         <thead>
           <tr><th>Status</th><th>Date</th><th>ASIN</th><th>SKU</th><th>Complaint</th><th>Review</th></tr>
           <tr class="filterrow">
-            <th><select data-f="st"><option value="">All reviews</option><option value="nr">Needs a human check</option><option value="nc">Uses a new code</option><option value="codeonly">No comment (code only)</option><option value="ok">Handled automatically</option><option value="done">Checked by the team</option><option value="ai">AI Classified</option><option value="human">Human Classified</option><option value="excluded">Excluded</option></select></th>
+            <th><select data-f="st"><option value="">All reviews</option><option value="nolabel">No label</option><option value="nc">Uses a new code</option><option value="codeonly">No comment (code only)</option><option value="ok">Handled automatically</option><option value="done">Checked by the team</option><option value="ai">AI Classified</option><option value="human">Human Classified</option><option value="excluded">Excluded</option><option value="unsure">AI was unsure</option></select></th>
             <th></th>
             <th><input data-f="a" placeholder="filter"></th>
             <th><input data-f="s" placeholder="filter"></th>
@@ -714,7 +718,7 @@ td.txt .prose{display:block;margin-top:2px}
       <p><b>Validation status.</b> <span id="a-valid"></span></p>
       <p><b>Label source.</b> <span id="a-src"></span></p>
       <p><b>Process noise.</b> <span id="a-noise"></span></p>
-      <p><b>Status labels.</b> <b>automatic</b> — the AI was confident and used a code you already have; nothing to do · <b>needs check</b> — it wasn't sure, so a person should confirm · <b>new code</b> — it used a complaint type that isn't in your list yet · <b>confirmed / corrected / removed</b> — someone has already decided. Figures and the complaint mix use the corrected label where one exists. The second badge on each row is separate from that: <b>AI Classified</b> — nobody has decided it, so the label being reported is the classifier's · <b>Human Classified</b> — a person confirmed or corrected it, and their label is the one being reported · <b>Excluded</b> — a person marked it not a complaint, so it reports no label at all.</p>
+      <p><b>Status labels.</b> The classifier labels every row it can read, and a labelled row carries no status tag — the label is finished work, not a flag · <b>unclassified</b> — no label at all, so that is the only row waiting for a person · <b>new code</b> — it used a complaint type that isn't in your list yet · <b>confirmed / corrected / removed</b> — someone has already decided. Low confidence is not a queue: those rows are labelled, and the signal stays reachable through the 'AI was unsure' filter for anyone auditing it. Figures and the complaint mix use the corrected label where one exists. The second badge on each row is separate from that: <b>AI Classified</b> — nobody has decided it, so the label being reported is the classifier's · <b>Human Classified</b> — a person confirmed or corrected it, and their label is the one being reported · <b>Excluded</b> — a person marked it not a complaint, so it reports no label at all.</p>
     </div>
   </details>
 </main></div>
@@ -736,7 +740,7 @@ let ROWS=[], VIEW=[], MIXSCOPE=[], page=0, PER=100, cur=null, mixOpen=false;
    Four numbers, four doors. Each one is a link to the view that answers it. */
 const CARDS=[
   {k:"total",        l:"complaint records",         s:"all sources and families",     href:"#table",      st:""},
-  {k:"needs_review", l:"need a human check",        s:"the AI wasn't confident",      href:"#table",      st:"nr"},
+  {k:"nolabel",      l:"unclassified",             s:"no label — the AI could not read it", href:"#table", st:"nolabel"},
   {k:"pending_codes",l:"codes awaiting a decision", s:"not in the complaint list yet",href:"./codes.html",st:null},
   {k:"corrections",  l:"corrected by the team",     s:"corrections applied to every figure", href:"#table", st:"done"},
   /* Appended, not inserted: the four above keep their order and their numbers.
@@ -1166,7 +1170,7 @@ function aboutPanel(mix, trend, ri, raw){
   el("a-pick").innerHTML=
     '<b>'+nfmt(KPI.no_prose)+'</b> of <b>'+nfmt(KPI.total)+'</b> rows carry no customer comment; '+
     'they hold the return-reason picklist only, so no label on them can be checked against what a '+
-    'customer wrote ('+nfmt(KPI.queue_no_prose)+' of them are still unreviewed). '+
+    'customer wrote ('+nfmt(KPI.queue_no_prose)+' of them carry a low-confidence label). '+
     'Filter them out with the status list to work only what can be checked.';
   el("a-valid").innerHTML=
     '<b>'+nfmt(KPI.validated)+'</b> of <b>'+nfmt(n)+'</b> records have a decision recorded in this app so far. '+
@@ -1181,8 +1185,8 @@ function aboutPanel(mix, trend, ri, raw){
     el("a-src").innerHTML='<b>'+nfmt(hv)+'</b> record'+(hv===1?' carries':'s carry')+' a human label, '+
       '<b>'+nfmt(n-hv-xv)+'</b> carry the AI’s'+
       (xv?' and <b>'+nfmt(xv)+'</b> '+(xv===1?'is':'are')+' excluded from reporting':'')+
-      '. The badge on each row says which of those is being reported; the status tag beside it '+
-      'says whether anyone has looked at the row yet, which is a different question.';
+      '. The badge on each row says which of those is being reported; the status '+
+      'tag, where one appears, marks a row with no label at all — a different question.';
   }
   el("a-rate").innerHTML=rateLong(ri,trend.months);
   el("a-feed").innerHTML=feedLong(w);
@@ -1304,14 +1308,18 @@ function status(r){
   if(r.dec==="corrected") return '<span class="tag ok">corrected</span>';
   if(r.dec==="rejected") return '<span class="tag blank">removed</span>';
   if(r.nc) return '<span class="tag new">new code</span>';
-  if(r.nr) return '<span class="tag rev">needs check</span>';
-  return '<span class="tag auto">automatic</span>';
+  /* No label is the ONLY state that needs a person. A row the classifier labelled
+     — confident or not — is finished work, so it carries no status tag at all;
+     the provenance badge is the honest record of who produced the label. */
+  if(!r.fc) return '<span class="tag rev">unclassified</span>';
+  return "";
 }
 
 /* Provenance: WHO produced the label being reported. Not the same question as
-   the tag beside it, which says whether anyone has looked at the row yet — a
-   row can be 'automatic' and AI-classified, or 'confirmed' and human-classified.
-   'Excluded' is its own value: those rows report no label at all. */
+   the tag beside it, which says whether the row is waiting for a person — a
+   labelled row carries no status tag (its confidence is a filter, not a queue),
+   so provenance is the only badge it shows. 'Excluded' is its own value: those
+   rows report no label at all. */
 function provenance(r){
   if(r.dec==="accepted"||r.dec==="corrected") return "Human Classified";
   if(r.dec==="rejected") return "Excluded";
@@ -1465,9 +1473,12 @@ function keepRow(r,raw,low,cut,skipDate){
   if(low("q") && !(r.t||"").toLowerCase().includes(low("q"))) return false;
   if(raw.fam && (r.fam||"")!==raw.fam) return false;
   if(raw.st==="codeonly" && r.hp) return false;
-  if(raw.st==="nr" && !r.nr) return false;
+  /* 'nr' is kept as an alias so an older link to the confidence view still lands
+     on the confidence view instead of silently filtering nothing. */
+  if((raw.st==="unsure"||raw.st==="nr") && !r.nr) return false;
+  if(raw.st==="nolabel" && r.fc) return false;
   if(raw.st==="nc" && !r.nc) return false;
-  if(raw.st==="ok" && (r.nr||r.nc||r.dec)) return false;
+  if(raw.st==="ok" && (!r.fc||r.nr||r.nc||r.dec)) return false;
   if(raw.st==="done" && !r.dec) return false;
   /* Provenance values in the same control as the status values: one column,
      one dropdown, so the two can never contradict each other. */
@@ -1490,6 +1501,15 @@ fetch("data/reviews.json").then(r=>r.json()).then(d=>{
   const srcSel=document.querySelector('[data-f="src"]'), fcSel=document.querySelector('[data-f="fc"]');
   if(srcSel) [...src].sort().forEach(v=>srcSel.insertAdjacentHTML("beforeend",`<option value="${esc(v)}">${esc(v)}</option>`));
   if(fcSel) Object.values(CATS).flat().forEach(o=>fcSel.insertAdjacentHTML("beforeend",`<option value="${esc(o.c)}">${esc(o.c)}</option>`));
+  /* The counts come from the payload, not the markup: a hard-coded number in the
+     template would silently rot the next time the classifier runs. */
+  const stSel=document.querySelector('[data-f="st"]');
+  if(stSel){
+    const o1=stSel.querySelector('option[value="nolabel"]');
+    const o2=stSel.querySelector('option[value="unsure"]');
+    if(o1) o1.textContent="No label ("+(KPI.nolabel||0).toLocaleString()+")";
+    if(o2) o2.textContent="AI was unsure ("+(KPI.needs_review||0).toLocaleString()+")";
+  }
   window.__d=d;
   apply();
 });
