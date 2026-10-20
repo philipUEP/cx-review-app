@@ -57,6 +57,15 @@ say "staging"
 mkdir -p "$APP_DIR/app" || die "cannot create $APP_DIR (run with sudo)"
 install -m 0644 "$SRC" "$APP_DIR/app/app.py"
 echo "  $SRC -> $APP_DIR/app/app.py"
+# The logo files are served from static/ BESIDE app.py (app.STATIC_DIR). Shipping
+# app.py alone would leave the login card and every nav bar with a broken image,
+# so they are installed right after it.
+STATIC_SRC="$(dirname "$SRC")/static"
+if [ -d "$STATIC_SRC" ]; then
+  mkdir -p "$APP_DIR/app/static"
+  install -m 0644 "$STATIC_SRC"/*.png "$APP_DIR/app/static/"
+  echo "  $STATIC_SRC/*.png -> $APP_DIR/app/static/"
+fi
 if [ -d "$(dirname "$SRC")/.git" ] && command -v git >/dev/null; then
   git -C "$(dirname "$SRC")" rev-parse --short HEAD 2>/dev/null | sed 's/^/  commit: /'
 fi

@@ -70,7 +70,8 @@ body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,
 a{color:var(--accent);text-decoration:none}
 .wrap{display:flex;min-height:100vh}
 aside{width:218px;flex:0 0 218px;background:var(--card);border-right:1px solid var(--line);padding:16px 0;position:sticky;top:0;height:100vh;overflow:auto}
-.brand{font-weight:750;font-size:17px;letter-spacing:-.02em;padding:0 18px 16px;border-bottom:1px solid var(--line);margin-bottom:10px}
+.brand{display:flex;align-items:center;gap:8px;font-weight:750;font-size:17px;letter-spacing:-.02em;padding:0 18px 16px;border-bottom:1px solid var(--line);margin-bottom:10px}
+.brand img.mark{height:24px;width:auto;display:block;flex:none}
 .brand span{display:block;font-size:10.5px;font-weight:600;color:var(--mut);letter-spacing:.08em;text-transform:uppercase;margin-top:2px}
 .grp{padding:10px 18px 4px;font-size:10.5px;font-weight:700;color:#9ca3af;letter-spacing:.08em;text-transform:uppercase}
 .nav{display:block;padding:7px 18px;color:#374151;font-size:13.5px;border-left:2px solid transparent}
@@ -143,7 +144,7 @@ SHELL = r"""<!doctype html><html><head><meta charset="utf-8">
 <style>__CSS__</style></head><body>
 <div class="wrap">
 <aside>
-  <div class="brand">UEP<span>Complaint validation</span></div>
+  <div class="brand"><img class="mark" src="assets/logo-mark-light.png" alt="UEP" width="84" height="24"><span>Complaint validation</span></div>
 __NAV__
 </aside>
 __BODY__

@@ -147,13 +147,27 @@ DENY_MAP = {
 AMZ_DP = "https://www.amazon.com/dp/"
 AMZ_SKU_SEARCH = "https://www.amazon.com/s?k="
 
+# Brand assets. app.py is installed on its own (deploy_on_box.sh copies this file
+# into $APP_DIR/app/), so the three logo files ship in a `static/` directory
+# BESIDE this file and are served by the route in app(). A whitelist, not a path:
+# no traversal, no directory listing, and a missing file is a 404 rather than a
+# 500. If the directory is absent the pages still render (the <img> 404s) — a
+# missing logo must never be a missing login page.
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+STATIC_FILES = {
+    "logo-full.png": "image/png",
+    "logo-mark.png": "image/png",
+    "logo-mark-light.png": "image/png",
+}
+
 CSS = """
 :root{--bg:#fbfbfd;--card:#fff;--ink:#1a1a1f;--mut:#6b6b76;--line:#e6e6ec;--accent:#2b5cff;--warn:#b45309;--bad:#b42318;--ok:#067647}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 28px;display:flex;align-items:center;gap:26px;position:sticky;top:0;z-index:5;flex-wrap:wrap}
-header .brand{font-weight:650;letter-spacing:-.01em}
+header .brand{font-weight:650;letter-spacing:-.01em;display:flex;align-items:center;gap:9px}
+header .brand img.mark{height:26px;width:auto;display:block;flex:none}
 header nav a{color:var(--mut);font-weight:500;margin-right:18px}
 header nav a.on{color:var(--ink);font-weight:650}
 main{max-width:1240px;margin:0 auto;padding:26px 28px 60px}
@@ -482,7 +496,7 @@ def page(title, body, active="", msg="", err=False, ctx=None):
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · AI Complaint Validation</title><style>{CSS}{ctx.get("css", "")}</style></head>
-<body><header><span class="brand">AI Complaint Validation</span><nav>{nav}</nav>{who_html}</header>
+<body><header><span class="brand"><img class="mark" src="/static/logo-mark-light.png" alt="UEP" width="91" height="26">AI Complaint Validation</span><nav>{nav}</nav>{who_html}</header>
 <main>{ctx.get("banner", "")}{flash}{body}</main>
 {ctx.get("scripts", "")}</body></html>"""
 
@@ -3840,10 +3854,8 @@ LOGIN_CSS = """
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;background:#f1f2f4;color:#1f2430;
   font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
-.wordmark{display:flex;align-items:center;gap:11px;padding:26px 32px}
-.wordmark .uep{font-size:27px;font-weight:800;letter-spacing:-.02em;color:#12386b}
-.wordmark .sep{width:1px;height:23px;background:#d2d6dd}
-.wordmark .full{font-size:10px;font-weight:650;letter-spacing:.15em;text-transform:uppercase;color:#7a8393}
+.brandmark{display:flex;justify-content:center;margin:0 0 28px}
+.brandmark img{display:block;width:100%;max-width:200px;height:auto;border-radius:8px}
 .wrap{display:flex;justify-content:center;padding:6vh 18px 60px}
 .card{background:#fff;border:1px solid #e2e5ea;border-radius:10px;width:100%;max-width:420px;
   padding:30px 32px 26px;box-shadow:0 1px 2px rgba(16,24,40,.04),0 14px 34px rgba(16,24,40,.07)}
@@ -3860,7 +3872,7 @@ button.login{background:#1a56db;border:1px solid #1a56db;color:#fff;font:inherit
   padding:10px 30px;border-radius:6px;cursor:pointer}
 button.login:hover{background:#1748b6}
 @media(max-width:520px){
-  .wordmark{padding:18px}.wordmark .uep{font-size:21px}.wordmark .full{font-size:9px}
+  .brandmark img{max-width:170px}
   .wrap{padding:2vh 14px 40px}.card{padding:24px 20px}
 }
 """
@@ -3869,16 +3881,17 @@ LOGIN_ERROR = "That email and password do not match our records"
 
 
 def login_page(error="", email="", next_path="/"):
-    """The sign-in card. Self-contained CSS, no JS, no external assets — it is the
-    first thing a user sees, so it must not depend on the app's data or CDN."""
+    """The sign-in card. Self-contained CSS, no JS, no CDN — it is the first thing a
+    user sees, so it must not depend on the app's data. The one external request is
+    the logo from this app's own /static route (no other host, no database)."""
     err = f'<div class="err" role="alert">{esc(error)}</div>' if error else ""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Login · AI Complaint Validation</title><style>{LOGIN_CSS}</style></head>
 <body>
-<div class="wordmark"><span class="uep">UEP</span><span class="sep"></span>
-<span class="full">Upper Echelon Products</span></div>
 <div class="wrap"><div class="card">
+<div class="brandmark"><img src="/static/logo-full.png" alt="Upper Echelon Products"
+     width="200" height="60"></div>
 <h1>Login</h1>
 {err}
 <form method="post" action="/login" novalidate>
@@ -4042,6 +4055,27 @@ def app(environ, start_response):
         return [body]
 
     secure = secure_request(environ)
+
+    # Brand assets: unauthenticated on purpose — the sign-in card shows the logo
+    # before anyone is signed in. Whitelisted names only (see STATIC_FILES).
+    if path.startswith("/static/"):
+        name = path[len("/static/"):]
+        ctype = STATIC_FILES.get(name)
+        data = None
+        if ctype:
+            try:
+                with open(os.path.join(STATIC_DIR, name), "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                data = None
+        if data is None:
+            start_response("404 Not Found", [("Content-Type", "text/plain; charset=utf-8"),
+                                             ("Content-Length", "9")])
+            return [b"not found"]
+        start_response("200 OK", [("Content-Type", ctype),
+                                  ("Content-Length", str(len(data))),
+                                  ("Cache-Control", "public, max-age=86400")])
+        return [data]
 
     if path == "/logout":
         return end_session(start_response, secure)

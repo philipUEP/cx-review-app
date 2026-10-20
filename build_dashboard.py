@@ -431,7 +431,8 @@ body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system
 a{color:var(--accent);text-decoration:none}
 .wrap{display:flex;min-height:100vh}
 aside{width:208px;flex:0 0 208px;background:var(--card);border-right:1px solid var(--line);padding:24px 0;position:sticky;top:0;height:100vh;overflow:auto}
-.brand{font-weight:700;font-size:16px;letter-spacing:-.02em;padding:0 20px 18px;color:var(--ink)}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;letter-spacing:-.02em;padding:0 20px 18px;color:var(--ink)}
+.brand img.mark{height:24px;width:auto;display:block;flex:none}
 .brand span{display:block;font-size:10px;font-weight:600;color:var(--soft);letter-spacing:.09em;text-transform:uppercase;margin-top:3px}
 .nav{display:block;padding:8px 20px;color:#374151;font-size:13.5px;border-left:2px solid transparent}
 .nav:hover{background:#fafbfc}
@@ -579,7 +580,7 @@ td.txt .prose{display:block;margin-top:2px}
 </style></head><body>
 <div class="wrap">
 <aside>
-  <div class="brand">UEP<span>Complaint validation</span></div>
+  <div class="brand"><img class="mark" src="assets/logo-mark-light.png" alt="UEP" width="84" height="24"><span>Complaint validation</span></div>
   <a class="nav on" href="./index.html">Reviews</a>
   <a class="nav" href="./codes.html">New codes</a>
   <a class="nav" href="./quality.html">Quality</a>

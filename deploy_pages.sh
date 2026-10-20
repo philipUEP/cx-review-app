@@ -34,6 +34,14 @@ cp "$SITE/data/reviews.json" "$STAGE/data/reviews.json"
 for f in charts.js codes.html quality.html; do
   [ -f "$SITE/$f" ] && cp "$SITE/$f" "$STAGE/$f" || echo "  note: $f not present, skipping"
 done
+# The brand mark is referenced RELATIVELY from every page's sidebar
+# (assets/logo-mark-light.png), so the directory has to travel with them or the
+# published header ships a broken image.
+if [ -d "$SITE/assets" ]; then
+  mkdir -p "$STAGE/assets"
+  cp "$SITE"/assets/*.png "$STAGE/assets/"
+  echo "  assets: $(ls "$STAGE/assets" | tr '\n' ' ')"
+fi
 
 echo "== deploying"
 export CLOUDFLARE_API_TOKEN="$TOKEN" CLOUDFLARE_ACCOUNT_ID="$A"
