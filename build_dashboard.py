@@ -272,6 +272,17 @@ def main():
     cur.execute("SELECT MIN(review_date) a, MAX(review_date) b FROM classifications"); rng = cur.fetchone()
     cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE human_validated=1"); validated = cur.fetchone()["c"]
     cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE human_decision='rejected'"); removed = cur.fetchone()["c"]
+    # Who decided, and when. The view carries human_decision but not the person
+    # behind it; corrections is the only table that has both, and the latest id
+    # per review is the row the view reads as current. Empty map today means
+    # every row is AI-classified, which is the truth and must render as such.
+    cur.execute("""SELECT k.review_id, k.reviewed_by_name, k.created_at
+                     FROM corrections k
+                     JOIN (SELECT review_id, MAX(id) id FROM corrections GROUP BY review_id) l
+                       ON l.id = k.id""")
+    decided_by = {r["review_id"]: (r["reviewed_by_name"] or "",
+                                   r["created_at"].strftime("%Y-%m-%d") if r["created_at"] else "")
+                  for r in cur.fetchall()}
     cur.execute("SELECT COUNT(*) c FROM v_rule_deletions"); rule_deleted = cur.fetchone()["c"]
     cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE final_complaint IS NULL"); nofinal = cur.fetchone()["c"]
     cur.execute("SELECT COUNT(*) c FROM v_ai_complaints WHERE has_prose=0"); no_prose = cur.fetchone()["c"]
@@ -348,6 +359,8 @@ def main():
             "corrections": corr,
             "validated": validated,
             "removed": removed,
+            "human": sum(1 for r in rows
+                         if r["human_decision"] in ("accepted", "corrected")),
             "rule_deleted": rule_deleted,
             "no_prose": no_prose,
             "queue_no_prose": queue_no_prose,
@@ -375,6 +388,10 @@ def main():
             "nr": int(r["needs_review"] or 0), "nc": int(r["is_new_code"] or 0),
             "hv": int(r["human_validated"] or 0),
             "dec": r["human_decision"] or "", "hc": r["human_complaint"] or "",
+            # Who decided and when, for the detail panel's sentence. Two short
+            # fields per row; empty string when the AI's label is the one shown.
+            "dn": decided_by.get(r["review_id"], ("", ""))[0],
+            "dd": decided_by.get(r["review_id"], ("", ""))[1],
             "t": r["text"] or "", "hp": int(r["has_prose"] or 0),
             # F6: the mirror's payload carried order_id but no dup_rank, so a row
             # that repeats a comment on the same order was invisible here.
@@ -460,7 +477,7 @@ button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .f.grow{flex:1 1 190px}
 .f.grow input{width:100%}
 .f select:focus,.f input:focus{outline:2px solid #dbeafe;border-color:#bfd4f7}
-.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:0 0 28px}
+.cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:16px;margin:0 0 28px}
 a.card{display:block;background:var(--card);border:1px solid var(--line);border-radius:11px;padding:16px 18px;color:inherit}
 a.card:hover{border-color:#c7d6f2}
 .card .n{font-size:25px;font-weight:680;letter-spacing:-.02em;line-height:1.1;font-variant-numeric:tabular-nums}
@@ -522,6 +539,11 @@ a.lnk:hover{text-decoration-thickness:2px}
 .tag.new{background:#f4f4f5;border-color:#e4e4e7;color:#3f3f46}
 .tag.ok{background:#f7f8fa;border-color:#e5e7eb;color:#374151}
 .tag.blank{background:#f7f8fa;border-color:#e5e7eb;color:#9ca3af}
+/* Provenance badge: WHO produced the label being reported, beside the status
+   tag that says WHETHER the row has been looked at. Two questions, two chips. */
+.tag.prov{background:#f4f4f5;border-color:#e4e4e7;color:#52525b;font-weight:600}
+.tag.prov.human{background:#eef3ff;border-color:#c9d9f8;color:#1d4ed8}
+.tag.prov.excl{background:#fdf3f2;border-color:#f2d3cf;color:#a4504a}
 .foot{display:flex;align-items:center;gap:10px;padding:11px 14px;border-top:1px solid var(--line);background:#fbfbfc;font-size:12.5px;color:var(--mut);flex-wrap:wrap}
 .foot .hint{margin-left:auto;color:var(--soft);font-size:12px}
 .detail{display:none;margin-top:20px}
@@ -564,6 +586,7 @@ td.txt .prose{display:block;margin-top:2px}
 .aboutbody{max-width:820px;font-size:12px;color:var(--mut);line-height:1.65;padding:0 0 8px 15px}
 .aboutbody p{margin:0 0 10px}
 .aboutbody b{color:#374151;font-weight:650}
+@media(max-width:1280px){.cards{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:1080px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:960px){.duo{grid-template-columns:minmax(0,1fr)}.dgrid{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:760px){
@@ -648,7 +671,7 @@ td.txt .prose{display:block;margin-top:2px}
         <thead>
           <tr><th>Status</th><th>Date</th><th>ASIN</th><th>SKU</th><th>Complaint</th><th>Review</th></tr>
           <tr class="filterrow">
-            <th><select data-f="st"><option value="">All reviews</option><option value="nr">Needs a human check</option><option value="nc">Uses a new code</option><option value="codeonly">No comment (code only)</option><option value="ok">Handled automatically</option><option value="done">Checked by the team</option></select></th>
+            <th><select data-f="st"><option value="">All reviews</option><option value="nr">Needs a human check</option><option value="nc">Uses a new code</option><option value="codeonly">No comment (code only)</option><option value="ok">Handled automatically</option><option value="done">Checked by the team</option><option value="ai">AI Classified</option><option value="human">Human Classified</option><option value="excluded">Excluded</option></select></th>
             <th></th>
             <th><input data-f="a" placeholder="filter"></th>
             <th><input data-f="s" placeholder="filter"></th>
@@ -689,8 +712,9 @@ td.txt .prose{display:block;margin-top:2px}
       <p><b>Picklist-only records.</b> <span id="a-pick"></span></p>
       <p><b>What the rate is.</b> <span id="a-rate"></span></p>
       <p><b>Validation status.</b> <span id="a-valid"></span></p>
+      <p><b>Label source.</b> <span id="a-src"></span></p>
       <p><b>Process noise.</b> <span id="a-noise"></span></p>
-      <p><b>Status labels.</b> <b>automatic</b> — the AI was confident and used a code you already have; nothing to do · <b>needs check</b> — it wasn't sure, so a person should confirm · <b>new code</b> — it used a complaint type that isn't in your list yet · <b>confirmed / corrected / removed</b> — someone has already decided. Figures and the complaint mix use the corrected label where one exists.</p>
+      <p><b>Status labels.</b> <b>automatic</b> — the AI was confident and used a code you already have; nothing to do · <b>needs check</b> — it wasn't sure, so a person should confirm · <b>new code</b> — it used a complaint type that isn't in your list yet · <b>confirmed / corrected / removed</b> — someone has already decided. Figures and the complaint mix use the corrected label where one exists. The second badge on each row is separate from that: <b>AI Classified</b> — nobody has decided it, so the label being reported is the classifier's · <b>Human Classified</b> — a person confirmed or corrected it, and their label is the one being reported · <b>Excluded</b> — a person marked it not a complaint, so it reports no label at all.</p>
     </div>
   </details>
 </main></div>
@@ -714,12 +738,17 @@ const CARDS=[
   {k:"total",        l:"complaint records",         s:"all sources and families",     href:"#table",      st:""},
   {k:"needs_review", l:"need a human check",        s:"the AI wasn't confident",      href:"#table",      st:"nr"},
   {k:"pending_codes",l:"codes awaiting a decision", s:"not in the complaint list yet",href:"./codes.html",st:null},
-  {k:"corrections",  l:"corrected by the team",     s:"corrections applied to every figure", href:"#table", st:"done"}
+  {k:"corrections",  l:"corrected by the team",     s:"corrections applied to every figure", href:"#table", st:"done"},
+  /* Appended, not inserted: the four above keep their order and their numbers.
+     This one answers a different question — whose label is being reported — and
+     carries the share of all records it holds underneath. */
+  {k:"human",        l:"Human classified",           s:()=>{const h=KPI.human||0,t=KPI.total||1,p=100*h/t;
+     return (h?((p<1?p.toFixed(2):p.toFixed(1))+"%"):"0.0%")+" of all records"}, href:"#table", st:"human"}
 ];
 document.getElementById("cards").innerHTML=CARDS.map(c=>
   `<a class="card" href="${c.href}" data-st="${c.st===null?"":c.st}">`+
   `<div class="n">${(KPI[c.k]||0).toLocaleString()}</div>`+
-  `<div class="l">${c.l}</div><div class="s">${c.s}</div></a>`).join("");
+  `<div class="l">${c.l}</div><div class="s">${typeof c.s==="function"?c.s():c.s}</div></a>`).join("");
 document.getElementById("cards").addEventListener("click",e=>{
   const a=e.target.closest("a.card"); if(!a) return;
   if(a.getAttribute("href")==="./codes.html") return;   /* real navigation */
@@ -1144,6 +1173,17 @@ function aboutPanel(mix, trend, ri, raw){
     'The labels themselves were validated before launch: the CX team has 553,055 human-labelled review×complaint pairs in the live module, and Chadia\u2019s own blind 220-row check of this AI put agreement at 83.6%. '+
     ' Figures and the complaint mix use the corrected label where one exists, and the AI’s own '+
     'label stays on each row for audit.';
+  /* Same three numbers as the badges on the rows, so the split always adds to
+     the row count on screen: human + AI + excluded = rows. */
+  {
+    const hv=VIEW.filter(r=>r.dec==="accepted"||r.dec==="corrected").length;
+    const xv=VIEW.filter(r=>r.dec==="rejected").length;
+    el("a-src").innerHTML='<b>'+nfmt(hv)+'</b> record'+(hv===1?' carries':'s carry')+' a human label, '+
+      '<b>'+nfmt(n-hv-xv)+'</b> carry the AI’s'+
+      (xv?' and <b>'+nfmt(xv)+'</b> '+(xv===1?'is':'are')+' excluded from reporting':'')+
+      '. The badge on each row says which of those is being reported; the status tag beside it '+
+      'says whether anyone has looked at the row yet, which is a different question.';
+  }
   el("a-rate").innerHTML=rateLong(ri,trend.months);
   el("a-feed").innerHTML=feedLong(w);
 }
@@ -1268,6 +1308,26 @@ function status(r){
   return '<span class="tag auto">automatic</span>';
 }
 
+/* Provenance: WHO produced the label being reported. Not the same question as
+   the tag beside it, which says whether anyone has looked at the row yet — a
+   row can be 'automatic' and AI-classified, or 'confirmed' and human-classified.
+   'Excluded' is its own value: those rows report no label at all. */
+function provenance(r){
+  if(r.dec==="accepted"||r.dec==="corrected") return "Human Classified";
+  if(r.dec==="rejected") return "Excluded";
+  return "AI Classified";
+}
+function provTag(r){
+  const p=provenance(r);
+  const cls=p==="Human Classified"?"human":(p==="Excluded"?"excl":"ai");
+  return `<span class="tag prov ${cls}" data-prov="${cls}">${p}</span>`;
+}
+function dlong(s){
+  if(!s) return "";
+  const d=new Date(s+"T00:00:00");
+  return isNaN(d)?s:d.toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"});
+}
+
 function amzLink(href,text,tip){
   return `<a class="lnk mono" href="${href}" target="_blank" rel="noopener"`+
          ` data-ext="1" onclick="event.stopPropagation()"`+
@@ -1296,7 +1356,7 @@ function render(){
   const slice=VIEW.slice(page*PER,(page+1)*PER);
   document.getElementById("table").dataset.match=VIEW.length;
   document.getElementById("tb").innerHTML=slice.map(r=>`<tr data-id="${r.id}" class="${cur===r.id?'sel':''}">
-    <td>${status(r)}</td>
+    <td>${status(r)} ${provTag(r)}</td>
     <td class="mono">${esc(r.d)}</td>
     <td class="mono">${asinCell(r)}</td>
     <td class="mono">${skuCell(r)}</td>
@@ -1331,7 +1391,7 @@ function openRow(id){
   cur=r;
   document.querySelectorAll("#tb tr").forEach(tr=>tr.classList.toggle("sel",tr.dataset.id===String(id)));
   document.getElementById("detail").classList.add("open");
-  document.getElementById("dt").innerHTML=`${esc(r.s||r.pr||"Review")} ${status(r)}`
+  document.getElementById("dt").innerHTML=`${esc(r.s||r.pr||"Review")} ${status(r)} ${provTag(r)}`
     +(r.hp?"":' <span class="tag blank">code only</span>');
   document.getElementById("dkv").innerHTML=[
     ["ASIN",r.a],["Review ID",r.id],["Date",r.d],["SKU",r.s],["Product",r.pr],["Title",r.ti],["Family",r.fam],["Parent",r.p],
@@ -1346,11 +1406,17 @@ function openRow(id){
   document.getElementById("dapp").innerHTML = APP
     ? `Read-only here. <a href="${APP}/review/${r.id}" target="_blank" rel="noopener">Open this review in the app to decide it ↗</a>`
     : `Read-only here. The review app is not available at this address yet, so this row cannot be decided from here.`;
-  document.getElementById("da").innerHTML = r.hc
-    ? `Validated by the team: <b>${esc(nice(r.fc))}</b> <span class="badge">corrected</span> — the AI had said ${esc(nice(r.c))}.`
-    : (r.dec==="rejected" ? `Removed by the team: not a complaint. The AI had said ${esc(nice(r.c))}.`
-       : (r.dec==="accepted" ? `Confirmed by the team as <b>${esc(nice(r.c))}</b>.`
-          : (r.c?`AI assigned: ${esc(nice(r.c))} — not checked by a person yet.`:"No complaint could be assigned.")));
+  /* The sentence that makes the badge auditable: a badge reading 'Human
+     Classified' without a name and a date is not a provenance record. */
+  const who=esc(r.dn)||"an unattributed user", when=dlong(r.dd)||"an unknown date";
+  document.getElementById("da").innerHTML =
+    (r.dec==="rejected")
+      ? `Excluded by ${who} on ${when} — marked not a complaint, so it is out of complaint reporting. The AI had said ${esc(nice(r.c))}.`
+    : (r.dec==="corrected")
+      ? `Corrected to <b>${esc(nice(r.fc))}</b> by ${who} on ${when} — the AI had said ${esc(nice(r.c))}.`
+    : (r.dec==="accepted")
+      ? `Confirmed by ${who} on ${when} as <b>${esc(nice(r.fc)||nice(r.c))}</b> — the human label is the one being reported.`
+    : (r.c?`Labelled by the classifier — no human decision yet, so the AI's ${esc(nice(r.c))} is what is reported.`:"");
   document.getElementById("dq").value="";
   complaintOptions();
   const on=document.querySelector("#dcats .opt.on"), box=document.getElementById("dcats");
@@ -1403,6 +1469,11 @@ function keepRow(r,raw,low,cut,skipDate){
   if(raw.st==="nc" && !r.nc) return false;
   if(raw.st==="ok" && (r.nr||r.nc||r.dec)) return false;
   if(raw.st==="done" && !r.dec) return false;
+  /* Provenance values in the same control as the status values: one column,
+     one dropdown, so the two can never contradict each other. */
+  if(raw.st==="ai" && r.dec) return false;
+  if(raw.st==="human" && !(r.dec==="accepted"||r.dec==="corrected")) return false;
+  if(raw.st==="excluded" && r.dec!=="rejected") return false;
   return true;
 }
 document.querySelectorAll("[data-f]").forEach(el=>{

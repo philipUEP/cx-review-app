@@ -207,6 +207,12 @@ tr:hover td{background:#fcfcff}
 .pill.new{background:#fff7ed;border-color:#fed7aa;color:var(--warn)}
 .pill.ok{background:#ecfdf3;border-color:#abefc6;color:var(--ok)}
 .pill.bad{background:#fef3f2;border-color:#fecdca;color:var(--bad)}
+/* Provenance: WHO produced the label this row reports as. Distinct from the
+   status pill beside it, which says WHETHER the row has been looked at — a row
+   can be 'automatic' and AI-classified, or 'confirmed' and human-classified. */
+.pill.prov{background:#f4f4f5;border-color:#e4e4e7;color:#52525b}
+.pill.prov.human{background:#eef3ff;border-color:#c9d9f8;color:#1d4ed8}
+.pill.prov.excl{background:#fdf3f2;border-color:#f2d3cf;color:#a4504a}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
 .prod{font-weight:600}
 .title{color:var(--mut);font-size:12.5px;margin-top:2px;max-width:340px}
@@ -883,6 +889,17 @@ def build_where(q):
         where.append("v.needs_review=1 AND v.human_validated=0")
     elif st == "newcode":
         where.append("v.is_new_code=1")
+    elif st == "ai":
+        # Provenance, not status: no human decision exists, so the label on
+        # screen is the classifier's.
+        where.append("v.human_decision IS NULL")
+    elif st == "human":
+        # accepted + corrected only. A rejected row carries a human decision but
+        # reports no label at all, so it must not answer a 'Human Classified'
+        # filter — that would put an 'Excluded' badge under a human filter.
+        where.append("v.human_decision IN ('accepted','corrected')")
+    elif st == "excluded":
+        where.append("v.human_decision='rejected'")
     txt = q.get("tx") or ""
     if txt == "codeonly":
         # No free text: only the return-reason picklist, so there is nothing to
@@ -2205,7 +2222,7 @@ DASH_CSS = """
 .df select:focus,.df input:focus{outline:2px solid #dbeafe;border-color:#bfd4f7}
 .dapply{padding:6px 14px;font-size:12.5px;border-radius:7px}
 .dclear{font-size:12px;color:#6b7280;padding-bottom:8px}
-.dcards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:20px 0 28px}
+.dcards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:16px;margin:20px 0 28px}
 .dcard{display:block;background:var(--card);border:1px solid #e9ebef;border-radius:11px;padding:16px 18px;color:inherit}
 .dcard:hover{border-color:#c7d6f2;text-decoration:none}
 .dcard .n{font-size:25px;font-weight:680;letter-spacing:-.02em;line-height:1.1;font-variant-numeric:tabular-nums}
@@ -2251,6 +2268,7 @@ DASH_CSS = """
 .dabout p{margin:12px 0 0;font-size:12.5px;color:#4b5563;line-height:1.6}
 .dabout b{color:#111827}
 .dabout code{font-size:11.5px}
+@media(max-width:1240px){.dcards{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:960px){.dcards{grid-template-columns:repeat(2,minmax(0,1fr))}.duo{grid-template-columns:1fr}}
 @media(max-width:560px){
   .dcards{grid-template-columns:1fr}
@@ -2422,6 +2440,21 @@ def p_dashboard(cur, q, msg="", ctx=None):
     # counting rows would inflate "decisions recorded" every time she changes her mind.
     cur.execute("SELECT COUNT(DISTINCT review_id) c FROM corrections")
     corr = int(cur.fetchone()["c"])
+    # ---- provenance ------------------------------------------------------
+    # Same predicate as the cards, so the fifth card and the disclosure cannot
+    # disagree with the rows. 'rejected' is counted on its own: those records
+    # carry a person's decision but report no label, so they are neither.
+    cur.execute(f"""SELECT COALESCE(SUM(v.human_decision IN ('accepted','corrected')),0) h,
+                           COALESCE(SUM(v.human_decision='rejected'),0) x
+                      FROM v_ai_complaints v {w}""", args)
+    _pv = cur.fetchone()
+    human_n, excl_n = int(_pv["h"]), int(_pv["x"])
+    ai_n = total - human_n - excl_n
+    human_pct = (100.0 * human_n / total) if total else 0.0
+    # One decimal is right for a real share and useless for a single row: 1 of
+    # 22,228 is 0.0045%, which must not print as '0.0%' beside a count of 1.
+    human_pct_txt = ("0.0%" if not human_n else
+                     (f"{human_pct:.2f}%" if human_pct < 1 else f"{human_pct:.1f}%"))
 
     # ---- what people complained about ----------------------------------
     cur.execute(f"""SELECT v.final_complaint c, COUNT(*) n FROM v_ai_complaints v {w}
@@ -2534,6 +2567,11 @@ def p_dashboard(cur, q, msg="", ctx=None):
         (pend, "codes awaiting a decision", "not in the complaint list yet", "/codes"),
         (corr, "decisions recorded", "confirmed, corrected or removed",
          f"/reviews?{esc(qstr(fq, status='decided'))}"),
+        # Appended, never inserted: the first four keep their order and their
+        # numbers. This one answers a different question — whose label is being
+        # reported — with the share it holds of the rows on screen.
+        (human_n, "Human classified", f"{human_pct_txt} of all records",
+         f"/reviews?{esc(qstr(fq, status='human'))}"),
     ]
     cards_html = "".join(
         f'<a class="dcard" href="{href}"><div class="n">{n:,}</div>'
@@ -2630,6 +2668,11 @@ def p_dashboard(cur, q, msg="", ctx=None):
     if hi and str(hi) >= str(date.today()):
         feed_txt += (f" Today ({_dash_day(str(hi))}) is incomplete and is not counted in the rates.")
 
+    # Only present when something is excluded, so the split stays one line.
+    excl_txt = (f" and <b>{excl_n:,}</b> {'is' if excl_n == 1 else 'are'} excluded from reporting"
+                if excl_n else "")
+    human_word = "record carries" if human_n == 1 else "records carry"
+
     about = f"""<details class="dabout">
 <summary>About this data <span>reconciliation · coverage · what the rate is</span></summary>
 <div class="dbody">
@@ -2649,6 +2692,9 @@ recorded in this app so far — each record counts once, however many times its 
 553,055 human-labelled review×complaint pairs in the live module, and Chadia’s own blind 220-row
 check of this AI put agreement at 83.6%. Figures and the mix use the corrected label where one
 exists, and the AI’s own label stays on each row for audit.</p>
+<p><b>Label source.</b> <b>{human_n:,}</b> {human_word} a human label, <b>{ai_n:,}</b> carry the
+AI’s{excl_txt}. The badge on each row says which of those is being reported; the status pill beside
+it says whether anyone has looked at the row yet, which is a different question.</p>
 <p><b>Process noise.</b> <b>{noise:,}</b> records are Review Deletion — a rule verdict on empty or
 non-complaint text, not a complaint. They stay in the records table and the CSV; the mix counts them
 only so the totals reconcile.</p>
@@ -2707,6 +2753,31 @@ already decided.</p>
 
 # ---------------------------------------------------------------- reviews list
 
+# ---------------------------------------------------------------- provenance
+PROV_AI, PROV_HUMAN, PROV_EXCL = "AI Classified", "Human Classified", "Excluded"
+
+
+def provenance(dec):
+    """WHO produced the label this record reports as.
+
+    Deliberately not the same question as the status pill beside it: that one
+    says whether a person has looked at the row, this one says whose label is
+    the one being counted. 'rejected' is its own value because those records
+    leave complaint reporting altogether — neither label is being reported.
+    """
+    if dec in ("accepted", "corrected"):
+        return PROV_HUMAN
+    if dec == "rejected":
+        return PROV_EXCL
+    return PROV_AI
+
+
+def prov_badge(dec):
+    p = provenance(dec)
+    cls = {PROV_HUMAN: "human", PROV_EXCL: "excl"}.get(p, "ai")
+    return f'<span class="pill prov {cls}" data-prov="{cls}">{p}</span>'
+
+
 def p_reviews(cur, q, msg="", ctx=None):
     w, args = build_where(q)
     # F11: these are RETURN RECORDS, not reviews: 22,188 of 22,228 carry an Amazon
@@ -2764,7 +2835,7 @@ def p_reviews(cur, q, msg="", ctx=None):
           <td class="mono">{amz_asin(r["asin"], r["title"])}</td>
           <td class="mono">{esc(r["parent"] or "—")}</td>
           <td>{amz_sku(r["sku"])}</td>
-          <td>{label}<br>{pill}</td>
+          <td>{label}<br>{pill} {prov_badge(r["human_decision"])}</td>
           <td class="rv" title="Click to read the full comment">{text_clip(r["txt"])}</td>
           <td class="open-cell"><a class="rowopen" href="/review/{rid}">open<span class="chev">›</span></a></td></tr>""")
 
@@ -2786,7 +2857,12 @@ def p_reviews(cur, q, msg="", ctx=None):
 
     statuses = "".join(f'<option value="{v}"{" selected" if q.get("status")==v else ""}>{lbl}</option>'
                        for v, lbl in [("new", "Unreviewed"), ("flagged", "Flagged, unreviewed"),
-                                      ("decided", "Decided"), ("newcode", "New code")])
+                                      ("decided", "Decided"), ("newcode", "New code"),
+                                      # Provenance rides in the same control: one dropdown,
+                                      # because a second one beside it would filter the same
+                                      # column and the two could contradict each other.
+                                      ("ai", "AI Classified"), ("human", "Human Classified"),
+                                      ("excluded", "Excluded")])
     # The complaint dropdown keeps the stored value (it is a filter, so it must
     # match the column) and only changes what it reads as.
     complaint_select = select('complaint', [(k, display_label(k, cur), n) for k, n in complaints],
@@ -2958,6 +3034,25 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
              if msg else "")
     who_name = esc((ctx or {}).get("who", {}).get("name", "unknown"))
 
+    # Whose label is on this record, said in words. The badge on the label row
+    # answers it at a glance; this sentence names the person and the date, since
+    # a badge reading 'Human' without saying which human is not auditable.
+    prov = prov_badge(state["decision"] if state else None)
+    if state:
+        _when = state["created_at"].strftime("%-d %b %Y") if state["created_at"] else "an unknown date"
+        _who = (esc(state["reviewed_by_name"]) if state["reviewed_by_name"]
+                else (f"user #{state['reviewed_by']}" if state["reviewed_by"] else "an unattributed user"))
+        if state["decision"] == "corrected":
+            prov_sentence = f"Corrected to <b>{esc(rep or '—')}</b> by {_who} on {_when}."
+        elif state["decision"] == "accepted":
+            prov_sentence = f"Confirmed by {_who} on {_when} — the AI’s label is the one being reported."
+        else:
+            prov_sentence = (f"Excluded by {_who} on {_when} — marked not a complaint, so it is out of "
+                             f"complaint reporting entirely.")
+    else:
+        prov_sentence = ("Labelled by the classifier — no human decision, so the AI’s label is the one "
+                         "being reported.")
+
     inner = f"""<div class="drw-head">
   <div class="drw-kicker">Review {esc(rid)} · {esc(r["review_date"])} · {esc(r["source"] or "")} {esc(r["country"] or "")}</div>
   <{title_tag} class="drw-title">{esc(r["product"] or "Unknown product")}{" — " + esc(short_title(r["title"])) if r["title"] else ""}</{title_tag}>
@@ -2976,7 +3071,8 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
       <span><b>{esc(ai or "—")}</b>{(" · " + esc(r["ai_category"])) if r["ai_category"] else ""}</span></div>
     {f'<div class="lblrow"><span class="k">Second choice</span><span class="drw-meta">{esc(second)}</span></div>' if second else ""}
     <div class="lblrow"><span class="k">Reporting as</span>
-      <span><b>{esc(rep or "—")}</b>{(" · " + esc(r["final_category"])) if r["final_category"] else ""}</span></div>
+      <span><b>{esc(rep or "—")}</b>{(" · " + esc(r["final_category"])) if r["final_category"] else ""} {prov}</span></div>
+    <div class="m">{prov_sentence}</div>
   </div>
 </div>
 <div class="drw-sec">
