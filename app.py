@@ -672,7 +672,7 @@ def text_snippet(t, n=140):
         s = " ".join(prose)
         body = f'<span class="meta">{esc(s[:n])}{"…" if len(s) > n else ""}</span>'
     else:
-        body = '<span class="meta" style="color:#9d174d">code only — nothing to check</span>'
+        body = '<span class="meta" style="color:#9d174d">No customer comment — only the return reason was recorded</span>'
     return head + (f'<br>{body}' if head else body)
 
 
@@ -686,7 +686,7 @@ def text_clip(t):
     if prose:
         body = f'<span class="rvprose">{esc(" ".join(prose))}</span>'
     else:
-        body = '<span class="rvprose none">code only — nothing to check</span>'
+        body = '<span class="rvprose none">No customer comment — only the return reason was recorded</span>'
     return f'<div class="rvclip">{head}{body}</div>'
 
 
@@ -2670,7 +2670,7 @@ def p_dashboard(cur, q, msg="", ctx=None):
         (total, "complaint records", "all sources and families", rec_href),
         # Unclassified, in the position the review queue used to hold: a row only
         # waits for a person when the AI produced no label for it.
-        (unlab, "unclassified", "no label — the AI could not read a complaint",
+        (unlab, "No label", "no comment from the customer, so there is nothing to classify",
          f"/reviews?{esc(qstr(fq, label='', review='nolabel'))}"),
         (pend, "codes awaiting a decision", "not in the complaint list yet", "/codes"),
         (corr, "decisions recorded", "confirmed, corrected or removed",
@@ -2945,7 +2945,7 @@ def p_reviews(cur, q, msg="", ctx=None):
             pill = '<span class="pill new" data-pill>new code</span>'
         elif not (r["final_complaint"] or "").strip():
             # The only row that is waiting for a person: nothing was labelled.
-            pill = '<span class="pill bad" data-pill>unclassified</span>'
+            pill = '<span class="pill bad" data-pill>no label</span>'
         else:
             # Labelled by the classifier — including its low-confidence calls.
             # No status tag: the work is done, so there is nothing to flag.

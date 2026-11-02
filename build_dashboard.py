@@ -765,7 +765,7 @@ let ROWS=[], VIEW=[], MIXSCOPE=[], page=0, PER=100, cur=null, mixOpen=false;
    Four numbers, four doors. Each one is a link to the view that answers it. */
 const CARDS=[
   {k:"total",        l:"complaint records",         s:"all sources and families",     href:"#table",      lb:"",      rv:""},
-  {k:"nolabel",      l:"unclassified",             s:"no label — the AI could not read it", href:"#table", lb:"", rv:"nolabel"},
+  {k:"nolabel",      l:"No label",                 s:"no comment from the customer", href:"#table", lb:"", rv:"nolabel"},
   {k:"pending_codes",l:"codes awaiting a decision", s:"not in the complaint list yet",href:"./codes.html",lb:null,   rv:null},
   {k:"corrections",  l:"corrected by the team",     s:"corrections applied to every figure", href:"#table", lb:"", rv:"decided"},
   /* Appended, not inserted: the four above keep their order and their numbers.
@@ -1406,7 +1406,7 @@ function status(r){
   /* No label is the ONLY state that needs a person. A row the classifier labelled
      — confident or not — is finished work, so it carries no status tag at all;
      the provenance badge is the honest record of who produced the label. */
-  if(!r.fc) return '<span class="tag rev">unclassified</span>';
+  if(!r.fc) return '<span class="tag rev">no label</span>';
   return "";
 }
 
@@ -1456,7 +1456,7 @@ function txtCell(r){
   /* Full prose in the DOM; CSS clamps it to three lines and the cell expands on
      click. Slicing the string here is what used to cut words in half. */
   const body=p.prose.length?`<span class="prose">${esc(p.prose.join(" "))}</span>`
-    :`<span class="prose" style="color:#6b7280">code only — nothing to check</span>`;
+    :`<span class="prose" style="color:#6b7280">No customer comment — only the return reason was recorded</span>`;
   return `<div class="rvclip">${head}${body}</div>`;
 }
 function render(){
@@ -1499,7 +1499,7 @@ function openRow(id){
   document.querySelectorAll("#tb tr").forEach(tr=>tr.classList.toggle("sel",tr.dataset.id===String(id)));
   document.getElementById("detail").classList.add("open");
   document.getElementById("dt").innerHTML=`${esc(r.s||r.pr||"Review")} ${status(r)} ${provTag(r)}`
-    +(r.hp?"":' <span class="tag blank">code only</span>');
+    +(r.hp?"":' <span class="tag blank">no comment</span>');
   document.getElementById("dkv").innerHTML=[
     ["ASIN",r.a],["Review ID",r.id],["Date",r.d],["SKU",r.s],["Product",r.pr],["Title",r.ti],["Family",r.fam],["Parent",r.p],
     ["Country",r.ct],["Source",r.src],["Order ID",r.o],["AI code",nice(r.c)],["AI category",r.cat],
