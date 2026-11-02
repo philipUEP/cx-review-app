@@ -57,6 +57,13 @@ say "staging"
 mkdir -p "$APP_DIR/app" || die "cannot create $APP_DIR (run with sudo)"
 install -m 0644 "$SRC" "$APP_DIR/app/app.py"
 echo "  $SRC -> $APP_DIR/app/app.py"
+# The watchdog lives beside the code it watches and is re-installed every deploy,
+# so a fresh clone or a reset can never leave the box without it.
+WATCHDOG_SRC="$(dirname "$SRC")/watchdog.sh"
+if [ -f "$WATCHDOG_SRC" ]; then
+  install -m 0755 "$WATCHDOG_SRC" "$APP_DIR/watchdog.sh"
+  echo "  $WATCHDOG_SRC -> $APP_DIR/watchdog.sh"
+fi
 # The logo files are served from static/ BESIDE app.py (app.STATIC_DIR). Shipping
 # app.py alone would leave the login card and every nav bar with a broken image,
 # so they are installed right after it.
@@ -288,6 +295,11 @@ EnvironmentFile=$APP_DIR/app.env
 ExecStart=$APP_DIR/venv/bin/python app.py
 Restart=always
 RestartSec=3
+# A wedged process keeps a pid and stops answering, which Restart=always cannot
+# see. These bound the two ways that happens: unbounded request threads and a
+# memory blow-up taking the whole box with it.
+TasksMax=256
+MemoryMax=2G
 
 [Install]
 WantedBy=multi-user.target
@@ -380,6 +392,18 @@ case "$gate_code" in
 esac
 login_code="$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Host: philip.amzmanager.net' http://127.0.0.1/login || true)"
 echo "  GET /login: $login_code (200 = the form is being served)"
+echo
+# --- watchdog ------------------------------------------------------------
+# The 2 Nov outage: the process stayed alive, stopped answering, and systemd
+# saw a healthy unit, so the site served 504s until someone noticed. This cron
+# is the only thing that closes that gap.
+if [ -f "$APP_DIR/watchdog.sh" ]; then
+  install -m 0755 "$APP_DIR/watchdog.sh" /usr/local/bin/ai-complaints-watchdog
+  printf '%s\n' '*/5 * * * * root /usr/local/bin/ai-complaints-watchdog >/dev/null 2>&1' \
+    > /etc/cron.d/ai-complaints-watchdog
+  chmod 0644 /etc/cron.d/ai-complaints-watchdog
+  echo "watchdog: /etc/cron.d/ai-complaints-watchdog every 5 min -> /var/log/ai-complaints-watchdog.log"
+fi
 echo
 echo "done. From the outside: https://philip.amzmanager.net/"
 echo "logs: journalctl -u ai-complaints -f   |   tail -f /var/log/nginx/ai-complaints.access.log"
