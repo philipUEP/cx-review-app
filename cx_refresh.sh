@@ -185,8 +185,12 @@ step "drift_check" $PY drift_check.py
 #    at its 'Code decisions' tab sent her to a surface that no longer takes decisions.
 #    Never a channel. Non-fatal by design (see warn_step): a Slack outage must not
 #    turn the freshness banner amber.
-echo "-- pending-code digest"
-warn_step "notify_pending_codes" $PY notify_pending_codes.py
+# Pending-code digest: OFF by decision (2 Nov 2026). It posted a Slack DM every
+# refresh cycle listing codes awaiting approve/deny. The queue is visible on
+# /codes and counted on the Overview card, so the message was a third copy of a
+# number already on screen. Left here, disabled, rather than deleted: the script
+# itself is intact and one line restores it.
+# warn_step "notify_pending_codes" $PY notify_pending_codes.py
 
 NOTE_OK="ok"
 [ ${#WARNED[@]} -gt 0 ] && NOTE_OK="ok (warnings: $(printf '%s; ' "${WARNED[@]}"))"
