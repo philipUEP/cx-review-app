@@ -971,9 +971,11 @@ def build_where(q):
         # value onto the pair it now belongs to. Nothing is silently dropped.
         lbl, rev = _LEGACY_STATUS.get(q.get("status") or "", ("", ""))
     if lbl == "ai":
-        # Provenance, not status: no human decision exists, so the label on
-        # screen is the classifier's.
-        where.append("v.human_decision IS NULL")
+        # Provenance, not status: no human decision exists AND the classifier
+        # actually produced a label. Without the second half this filter would
+        # return the 41 rows that have no label at all, which are not
+        # 'AI Classified' by any reading of the words.
+        where.append("v.human_decision IS NULL AND COALESCE(TRIM(v.final_complaint),'') <> ''")
     elif lbl == "human":
         # accepted + corrected only. A rejected row carries a human decision but
         # reports no label at all, so it must not answer a 'Human Classified'
@@ -2868,26 +2870,36 @@ filter is how you reach the rows that are not.</p>
 # ---------------------------------------------------------------- reviews list
 
 # ---------------------------------------------------------------- provenance
-PROV_AI, PROV_HUMAN, PROV_EXCL = "AI Classified", "Human Classified", "Excluded"
+PROV_AI, PROV_HUMAN, PROV_EXCL, PROV_NONE = ("AI Classified", "Human Classified", "Excluded",
+                                            "Not classified")
 
 
-def provenance(dec):
+def provenance(dec, has_label=True):
     """WHO produced the label this record reports as.
 
     Deliberately not the same question as the status pill beside it: that one
     appears only when a row has no label at all, this one says whose label is
     the one being counted. 'rejected' is its own value because those records
     leave complaint reporting altogether — neither label is being reported.
+
+    has_label matters: a row with no decision and no label was NOT classified by
+    the AI, so claiming 'AI Classified' beside an 'unclassified' tag contradicts
+    itself. Those rows carry no provenance badge at all — the status tag already
+    says everything true about them.
     """
     if dec in ("accepted", "corrected"):
         return PROV_HUMAN
     if dec == "rejected":
         return PROV_EXCL
+    if not has_label:
+        return PROV_NONE
     return PROV_AI
 
 
-def prov_badge(dec):
-    p = provenance(dec)
+def prov_badge(dec, has_label=True):
+    p = provenance(dec, has_label)
+    if p == PROV_NONE:
+        return ""          # the 'unclassified' tag says it; two labels would fight
     cls = {PROV_HUMAN: "human", PROV_EXCL: "excl"}.get(p, "ai")
     return f'<span class="pill prov {cls}" data-prov="{cls}">{p}</span>'
 
@@ -2952,7 +2964,7 @@ def p_reviews(cur, q, msg="", ctx=None):
           <td class="mono">{amz_asin(r["asin"], r["title"])}</td>
           <td class="mono">{esc(r["parent"] or "—")}</td>
           <td>{amz_sku(r["sku"])}</td>
-          <td>{label}<br>{pill} {prov_badge(r["human_decision"])}</td>
+          <td>{label}<br>{pill} {prov_badge(r["human_decision"], bool((r["final_complaint"] or "").strip()))}</td>
           <td class="rv" title="Click to read the full comment">{text_clip(r["txt"])}</td>
           <td class="open-cell"><a class="rowopen" href="/review/{rid}">open<span class="chev">›</span></a></td></tr>""")
 
@@ -3004,10 +3016,11 @@ def p_reviews(cur, q, msg="", ctx=None):
     # what this filter set would open.
     qo = {k: v for k, v in q.items() if k not in ("page", "label", "review", "status")}
     w0, a0 = build_where(qo)
-    cur.execute(f"""SELECT COALESCE(SUM(v.human_decision IS NULL),0) ai,
+    cur.execute(f"""SELECT COALESCE(SUM(v.human_decision IS NULL
+                                          AND COALESCE(TRIM(v.final_complaint),'') <> ''),0) ai,
                            COALESCE(SUM(v.human_decision IN ('accepted','corrected')),0) hu,
                            COALESCE(SUM(v.needs_review=1),0) nr,
-                           COALESCE(SUM(v.final_complaint IS NULL),0) nl
+                           COALESCE(SUM(COALESCE(TRIM(v.final_complaint),'') = ''),0) nl
                       FROM v_ai_complaints v {w0}""", a0)
     _qc = cur.fetchone()
     # What counts as 'already active' has to match what build_where actually
@@ -3216,7 +3229,8 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
     # Whose label is on this record, said in words. The badge on the label row
     # answers it at a glance; this sentence names the person and the date, since
     # a badge reading 'Human' without saying which human is not auditable.
-    prov = prov_badge(state["decision"] if state else None)
+    _has_label = bool((rep or "").strip()) if state else bool((ai or "").strip())
+    prov = prov_badge(state["decision"] if state else None, _has_label)
     if state:
         _when = state["created_at"].strftime("%-d %b %Y") if state["created_at"] else "an unknown date"
         _who = (esc(state["reviewed_by_name"]) if state["reviewed_by_name"]
@@ -3229,8 +3243,9 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
             prov_sentence = (f"Excluded by {_who} on {_when} — marked not a complaint, so it is out of "
                              f"complaint reporting entirely.")
     else:
-        prov_sentence = ("Labelled by the classifier — no human decision, so the AI’s label is the one "
-                         "being reported.")
+        prov_sentence = (("Labelled by the classifier — no human decision, so the AI’s label is the one "
+                          "being reported.") if _has_label else
+                         ("No label on this record — the classifier produced nothing, so it needs a person."))
 
     inner = f"""<div class="drw-head">
   <div class="drw-kicker">Review {esc(rid)} · {esc(r["review_date"])} · {esc(r["source"] or "")} {esc(r["country"] or "")}</div>

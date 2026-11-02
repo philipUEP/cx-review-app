@@ -1418,10 +1418,14 @@ function status(r){
 function provenance(r){
   if(r.dec==="accepted"||r.dec==="corrected") return "Human Classified";
   if(r.dec==="rejected") return "Excluded";
+  // A row with no label was NOT classified. Saying "AI Classified" beside an
+  // "unclassified" tag contradicts itself, so these rows carry no provenance.
+  if(!((r.fc||"").trim())) return "";
   return "AI Classified";
 }
 function provTag(r){
   const p=provenance(r);
+  if(!p) return "";
   const cls=p==="Human Classified"?"human":(p==="Excluded"?"excl":"ai");
   return `<span class="tag prov ${cls}" data-prov="${cls}">${p}</span>`;
 }
