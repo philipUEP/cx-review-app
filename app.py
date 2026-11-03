@@ -30,9 +30,11 @@ Routes
   /monthly_sku.csv  one row per SKU-month — the pivot export (R1)
   /rules            the picklist -> code mapping, published for review: it labels the
                     8,516 records no prose sample can reach
-  /codes            proposed codes: approve (joins the vocabulary AND the classifier's
-                    vocabulary file) or deny (durable; the replacement is required and
-                    pre-selected when one was prescribed)
+  /codes            proposed codes, each with the records behind it (SKU, ASIN, title,
+                    full comment): approve (joins the vocabulary AND the classifier's
+                    vocabulary file), deny (durable; the replacement is required and
+                    pre-selected when one was prescribed), or replace with a code the
+                    reviewer types herself — new codes are approved on the spot
   /quality          the weekly 45-row random check: record a call per row
   /export.csv       the current filter as CSV (?text=1 adds the review text)
   /login            branded sign-in form (email + password), sets a signed cookie
@@ -335,6 +337,39 @@ td.rv{min-width:300px;max-width:520px;cursor:pointer}
 .rvprose{display:inline}
 .rvprose.none{color:#9d174d}
 
+/* ---------------------------------------------------------------- proposed-code evidence
+   A proposed code is a question about real rows, so the rows sit under it: the
+   SKU, the ASIN, the product title and the customer's full comment. No clamp and
+   no character slice here — a comment cut mid-word is evidence the reviewer
+   cannot weigh. Long unbroken strings (titles, URLs) wrap instead of widening
+   the table, so the page never scrolls sideways on a phone. */
+.ev{padding:2px 0 4px;max-width:100%}
+.ev-h{margin:0 0 9px;font-size:12.5px;color:var(--mut)}
+.ev-r{border:1px solid var(--line);border-radius:9px;background:#fafafc;padding:11px 13px;margin:0 0 8px}
+.ev-m{display:flex;flex-wrap:wrap;gap:2px 16px;font-size:12.5px;color:var(--mut);align-items:baseline}
+.ev-m .ev-k{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#9ca3af;margin-right:6px}
+.ev-t{margin:6px 0 6px;font-size:13px;color:var(--ink);overflow-wrap:anywhere;line-height:1.45}
+.ev-x{font-size:13.5px;line-height:1.6;overflow-wrap:anywhere;min-width:0}
+.ev-chips{display:flex;flex-wrap:wrap;margin-bottom:3px}
+.ev-prose{white-space:pre-wrap;overflow-wrap:anywhere;color:#374151}
+.ev-none{color:var(--mut);font-style:italic;font-size:13px}
+.ev-more{margin:4px 0 0}
+.ev-more summary{cursor:pointer;display:inline-block;font-size:12.5px;font-weight:650;color:var(--accent);
+  padding:2px 0;border-radius:5px}
+.ev-more summary:hover{text-decoration:underline}
+.ev-more summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ev-more[open] summary{margin-bottom:9px}
+td.evcell{padding:0 12px 14px;background:#fff}
+tr:hover td.evcell{background:#fff}
+
+/* the three decisions, one row each: approve / deny / type your own code */
+.cdec{display:flex;flex-direction:column;gap:8px;min-width:0}
+.cdec-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;min-width:0}
+.cdec-row select,.cdec-row input{min-width:0;max-width:100%}
+.cdec-row input[type=text]{flex:1 1 190px;min-width:150px}
+button.own{border-color:#c7d2fe;color:#1d4ed8;background:#f5f8ff}
+button.own:hover{background:#eef2ff}
+
 /* ---------------------------------------------------------------- drawer
    One panel, 620px, its own scroll, over a dimmed backdrop. It replaces the
    navigation to a second tab: the table stays behind it and the URL stays put. */
@@ -415,6 +450,13 @@ body.drw-open{overflow:hidden}
   .mixgrid{grid-template-columns:minmax(0,1fr)}
   .mixtbl{table-layout:fixed;width:100%}
   .mixtbl td.c{max-width:none;white-space:normal}
+  /* The decision column is the widest thing on the New codes page: the typed
+     code and both selects take the row's own width instead of sizing to their
+     longest option, so the table is 425px instead of 711px at 390px wide. */
+  .cdec-row input[type=text]{flex:1 1 100%;width:100%;min-width:0}
+  .cdec-row select{width:100%;min-width:0;max-width:100%}
+  td.evcell{padding:0 6px 14px}
+  .ev-r{padding:10px 11px}
 }
 """
 
@@ -688,6 +730,77 @@ def text_clip(t):
     else:
         body = '<span class="rvprose none">No customer comment — only the return reason was recorded</span>'
     return f'<div class="rvclip">{head}{body}</div>'
+
+
+# ---------------------------------------------------------------- code evidence
+# A proposed code ("Too Deep", 1 record) is a question about real rows, and the
+# reviewer cannot answer it from a 150-character sliver: she needs the SKU to
+# recognise the product, the ASIN to check it, and the whole comment to judge.
+EVIDENCE_SHOWN = 5     # rows always visible; the rest behind one disclosure
+
+
+def ev_text(t):
+    """The full comment, unclamped and unsliced, or plain words when there is none.
+
+    A blank cell reads as missing data and 'code only' was jargon the reader had
+    to decode; both are worse than saying what actually happened on the record.
+    """
+    chips, prose = text_parts(t)
+    out = f'<div class="ev-chips">{chips_html(chips)}</div>' if chips else ""
+    if prose:
+        out += f'<div class="ev-prose">{esc(" ".join(prose))}</div>'
+    elif chips:
+        out += ('<div class="ev-none">No customer comment. '
+                'The return reason is the only text on this record.</div>')
+    else:
+        out += ('<div class="ev-none">No customer comment and no return reason '
+                'was recorded on this record.</div>')
+    return out
+
+
+def code_records(cur, code):
+    """The rows that carry a proposed code, newest first.
+
+    Same source as the records table (v_ai_complaints) and the same rule the
+    decision paths act on: a row carries the code when final_complaint says so,
+    or — with no final label — when the classifier's ai_complaint does.
+    """
+    cur.execute("""SELECT v.review_id, v.review_date, v.sku, v.asin, v.title, v.review_text
+                     FROM v_ai_complaints v
+                    WHERE COALESCE(v.final_complaint, v.ai_complaint) = %s
+                    ORDER BY v.review_date DESC, v.review_id DESC""", (code,))
+    return cur.fetchall()
+
+
+def evidence_html(rows):
+    """The record list under one proposed code: 5 rows, then 'Show all N'."""
+    if not rows:
+        return ('<div class="ev"><p class="ev-h">No record carries this code right now, '
+                'so there is nothing behind it to read.</p></div>')
+
+    def one(r):
+        d = r["review_date"]
+        d = d.isoformat() if hasattr(d, "isoformat") else (d or "")
+        title = (r["title"] or "").strip()
+        title_html = f'<div class="ev-t">{esc(title)}</div>' if title else ""
+        return (f'<article class="ev-r">'
+                f'<div class="ev-m"><span class="mono">{esc(d or "—")}</span>'
+                f'<span><span class="ev-k">SKU</span>{amz_sku(r["sku"])}</span>'
+                f'<span><span class="ev-k">ASIN</span>{amz_asin(r["asin"], r["title"])}</span></div>'
+                f'{title_html}'
+                f'<div class="ev-x">{ev_text(r["review_text"])}</div>'
+                f'</article>')
+
+    n = len(rows)
+    head = (f'<p class="ev-h">{n:,} record{"s" if n != 1 else ""} '
+            f'{"carry" if n != 1 else "carries"} this code — the same rows the decision applies to.</p>')
+    shown = "".join(one(r) for r in rows[:EVIDENCE_SHOWN])
+    rest = rows[EVIDENCE_SHOWN:]
+    more = ""
+    if rest:
+        more = ('<details class="ev-more"><summary>Show all '
+                f'{n:,} records</summary>' + "".join(one(r) for r in rest) + '</details>')
+    return f'<div class="ev">{head}{shown}{more}</div>'
 
 
 # ---------------------------------------------------------------- refresh health
@@ -3756,7 +3869,7 @@ def monthly_sku_csv(cur, q):
 
 # ---------------------------------------------------------------- codes
 
-def p_codes(cur, q, msg="", ctx=None):
+def p_codes(cur, q, msg="", ctx=None, err=False):
     cur.execute("SELECT * FROM proposed_codes ORDER BY status='pending' DESC, n_rows DESC")
     rows = cur.fetchall()
     approved = approved_codes(cur)
@@ -3765,6 +3878,8 @@ def p_codes(cur, q, msg="", ctx=None):
     denials = {r["code"]: r["replacement"] for r in cur.fetchall()}
 
     trs = []
+    pending = [r["code"] for r in rows if r["status"] == "pending"]
+    evidence = {c: code_records(cur, c) for c in pending}
     for r in rows:
         st = {"pending": '<span class="pill new">pending</span>',
               "approved": '<span class="pill ok">approved</span>',
@@ -3780,16 +3895,36 @@ def p_codes(cur, q, msg="", ctx=None):
                 f'<option value="{esc(c["code"])}"{" selected" if mapped_ok == c["code"] else ""}>'
                 f'{esc(c["code"])}</option>' for c in approved)
             deny_lbl = f'Deny → remap to {esc(mapped_ok)}' if mapped_ok else "Deny"
-            act = f"""<form method="post" action="/codes" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-              <input type="hidden" name="code" value="{esc(r['code'])}">
-              <select name="category" title="category for an approved code">
-                <option value="">category…</option>
-                {''.join(f'<option value="{esc(c)}">{esc(c)}</option>' for c in cats)}</select>
-              <button name="action" value="approved" class="primary">Approve</button>
-              <select name="replacement" title="deny: the code you mean instead (required)">
-                <option value="">remap to…</option>{repl_opts}</select>
-              <button name="action" value="denied" class="danger">{deny_lbl}</button>
-            </form>"""
+            cat_opts = "".join(f'<option value="{esc(c)}">{esc(c)}</option>' for c in cats)
+            # Three decisions, three rows: approve, deny, or type the code you
+            # would have used. The third is a SEPARATE form because it takes a
+            # typed code where the deny takes a chosen one — same field name in
+            # two forms is fine; in one form it would collide.
+            act = f"""<div class="cdec">
+              <form method="post" action="/codes" class="cdec-row">
+                <input type="hidden" name="code" value="{esc(r['code'])}">
+                <select name="category" title="category for an approved code">
+                  <option value="">category…</option>
+                  {cat_opts}</select>
+                <button name="action" value="approved" class="primary">Approve</button>
+                <select name="replacement" title="deny: the code you mean instead (required)">
+                  <option value="">remap to…</option>{repl_opts}</select>
+                <button name="action" value="denied" class="danger">{deny_lbl}</button>
+              </form>
+              <form method="post" action="/codes" class="cdec-row ownf">
+                <input type="hidden" name="code" value="{esc(r['code'])}">
+                <input type="text" name="replacement" required maxlength="120"
+                       placeholder="type the code you would use"
+                       aria-label="Your own code, replacing {esc(r['code'])}">
+                <select name="category" title="category — needed only when the typed code is new">
+                  <option value="">category (only if new)…</option>
+                  {cat_opts}</select>
+                <button name="action" value="own" class="own">Use a different code</button>
+              </form>
+              <div class="meta">Your own code denies “{esc(r['code'])}” and moves its records to the code you
+                type — the same place a deny puts them. The category is only needed when that code is not in
+                the vocabulary yet; a code that already exists keeps its category.</div>
+            </div>"""
             if mapped_ok:
                 act += (f'<div class="meta">prescribed mapping pre-selected: '
                         f'{esc(r["code"])} → {esc(mapped_ok)} — change it or deny without one and the deny is refused</div>')
@@ -3801,23 +3936,121 @@ def p_codes(cur, q, msg="", ctx=None):
                         if denials.get(r["code"]) else "")
         trs.append(f"""<tr><td><b>{esc(r["code"])}</b></td><td class="mono num">{r["n_rows"]:,}</td>
           <td class="meta">{esc((r["example_review"] or "")[:150])}</td><td>{act}</td></tr>""")
+        # The evidence sits directly under its code, in the same table, so a
+        # decision is never made against a label the reviewer cannot see.
+        if r["status"] == "pending":
+            trs.append(f'<tr class="evrow"><td colspan="4" class="evcell">'
+                       f'{evidence_html(evidence.get(r["code"]) or [])}</td></tr>')
 
     body = f"""<h1>New complaint codes</h1>
-<p class="sub">Codes the classifier produced that the module does not have. <b>Approve</b> adds the code to the
+<p class="sub">Codes the classifier produced that the module does not have. Each one carries the records behind
+it — SKU, ASIN, product title and the customer's full comment — so the decision is made against the text, not a
+summary of it. <b>Approve</b> adds the code to the
 vocabulary with a category — its records stop being “new”, and the code is written to the vocabulary file the
 classifier loads, so the next classification batch can emit it. <b>Deny</b> suppresses the code and remaps its
 records to the one you choose; a deny without a replacement is refused, because it would silently drop those
-records out of every rollup. Where a replacement was prescribed for the code, it is selected in the dropdown and
+records out of every rollup. <b>Use a different code</b> is the same deny with a code you type yourself — it does
+not have to be in the vocabulary yet, and when it is new you give it a category here. Where a replacement was
+prescribed for the code, it is selected in the dropdown and
 named on the button — nothing is applied behind your back.</p>
 <div class="card"><table><thead><tr><th>Code</th><th class="num">Records</th><th>Example</th><th>Decision</th></tr></thead>
 <tbody>{''.join(trs) or '<tr><td colspan="4" class="empty">Nothing proposed.</td></tr>'}</tbody></table></div>"""
-    return page("New codes", body, "/codes", msg, ctx=ctx)
+    # err is passed through: a refused deny/own-code is a refusal, and a green
+    # "success" bar over it reads as if something was written.
+    return page("New codes", body, "/codes", msg, err=err, ctx=ctx)
+
+
+def do_own_code(cur, f, who, code):
+    """Replace a proposed code with one the reviewer types. -> (message, is_error)
+
+    The same outcome as a deny — the proposal is denied and its records move to the
+    code given — but the destination is typed, so it need not exist in the vocabulary
+    yet. Because it may be new, this path also approves it: the reviewer just used it,
+    so the classifier must be able to emit it.
+
+    Every write happens in ONE transaction. Half a decision is worse than none: a
+    denial written while the records still carry the rejected code is a page that
+    disagrees with itself. On any failure all the writes roll back and the message
+    says nothing changed.
+    """
+    repl = " ".join((f.get("replacement") or "").split())   # trim + collapse inner runs
+    if not repl:
+        return ("Type the code you would have used — an empty replacement would leave those records "
+                "carrying a label you rejected.", True)
+    if norm(repl) == norm(code):
+        return "That is the code you are replacing — type the code you would have used instead.", True
+    if len(repl) > 120:
+        return ("That code is too long — 120 characters is the maximum the vocabulary stores.", True)
+
+    want_cat = (f.get("category") or "").strip()
+    cur.execute("SELECT category, approved FROM complaint_codes WHERE code=%s", (repl,))
+    known = cur.fetchone()
+    if known:
+        # It already exists: her category is left exactly as it is.
+        cat = known["category"]
+        if known["approved"]:
+            tail_note = " The code was already in the vocabulary."
+        else:
+            tail_note = " The code was in the vocabulary but not approved; it is now approved."
+    else:
+        if not want_cat:
+            return (f"“{repl}” is not a code yet — pick a category so it can appear in the rollups.", True)
+        cat = want_cat[:80]
+        tail_note = ""
+
+    conn = cur.connection
+    try:
+        conn.autocommit(False)
+    except Exception:                     # already in manual mode
+        pass
+    try:
+        cur.execute("""INSERT INTO complaint_codes (code, category, source, approved)
+                       VALUES (%s,%s,'chadia-approved',1)
+                       ON DUPLICATE KEY UPDATE approved=1""", (repl, cat))
+        # Same record as the deny path writes, so the refresh host maps future
+        # classifications of the rejected code the same way.
+        cur.execute("""INSERT INTO code_denials (code, replacement, note, decided_by)
+                       VALUES (%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE replacement=VALUES(replacement), note=VALUES(note),
+                         decided_by=VALUES(decided_by), decided_at=NOW()""",
+                    (code, repl, "replaced with reviewer's own code", (who or {}).get("uid")))
+        cur.execute("""UPDATE proposed_codes SET status='denied', decided_at=NOW(), decided_by=%s, note=%s
+                        WHERE code=%s""", ((who or {}).get("uid"), f"-> {repl} (own code)", code))
+        # The relabel the deny path performs, unchanged: one UPDATE, both label
+        # columns, so the row leaves the "new code" state too.
+        cur.execute("""UPDATE classifications SET complaint=%s, category=COALESCE(%s, category), is_new_code=0
+                        WHERE complaint=%s""", (repl, cat, code))
+        n = cur.rowcount
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        return (f"Nothing was changed: replacing “{code}” with “{repl}” failed ({exc}). "
+                f"The code is still pending and its records still carry the old label."), True
+    finally:
+        try:
+            conn.autocommit(True)
+        except Exception:
+            pass
+
+    # The same vocabulary write the approve path does, for the same reason: the
+    # database row is the durable record, the file is the leg the classifier
+    # loads. A failure is reported, never claimed as done.
+    vpath, verr = vocab_upsert(repl, cat) if cat else (None, "no category on that vocabulary row")
+    if vpath:
+        tail = f" Written to {os.path.relpath(vpath)}."
+    else:
+        tail = (" The database row is the durable record (approved=1); the classifier vocabulary file was "
+                f"NOT updated ({verr}), so it cannot be emitted until data/vocab_additions.csv is written "
+                "on the refresh host.")
+    return (f"“{code}” replaced with “{repl}” on {max(n, 0):,} record{'s' if max(n, 0) != 1 else ''}. "
+            f"The new code is approved and the classifier can emit it from the next batch."
+            + tail_note + tail), False
 
 
 def do_code(cur, f, who):
     code = (f.get("code") or "").strip()
     act = f.get("action") or ""
-    if not code or act not in ("approved", "denied"):
+    if not code or act not in ("approved", "denied", "own"):
         return "Bad request.", True
     cur.execute("SELECT status FROM proposed_codes WHERE code=%s", (code,))
     if not cur.fetchone():
@@ -3855,6 +4088,10 @@ def do_code(cur, f, who):
                     f"WHERE approved=1 AND source='chadia-approved'.")
         return (f"Approved “{code}” as {cat}. {max(n, 0):,} review(s) are no longer flagged as a new code."
                 + tail), False
+
+    if act == "own":
+        return do_own_code(cur, f, who, code)
+
 
     # deny ---------------------------------------------------------------
     # No hidden default: the replacement must be a value that arrived in the form.
@@ -4565,7 +4802,7 @@ def app(environ, start_response):
             html = p_review(cur, rid, q, msg, err, ctx,
                             partial=(q.get("partial") == "1" or environ.get("HTTP_X_DRAWER") == "1"))
         elif path == "/codes":
-            html = p_codes(cur, q, msg, ctx)
+            html = p_codes(cur, q, msg, ctx, err)
         elif path == "/quality":
             html = p_quality(cur, q, msg, ctx)
         elif path == "/monthly":
