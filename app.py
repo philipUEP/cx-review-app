@@ -422,6 +422,22 @@ body.drw-open{overflow:hidden}
 .kv{display:grid;grid-template-columns:118px 1fr;gap:7px 14px;margin:0;font-size:14px;line-height:1.5}
 .kv dt{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);padding-top:2px}
 .kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+/* Quality page. "Agree" must be a single obvious click, because the previous
+   page left a blank dropdown looking like the way to say it — the reviewer
+   used that and her agreement never reached the numerator. */
+.qprog{background:var(--card);border:1px solid var(--line);border-radius:10px;
+  padding:12px 16px;margin:0 0 14px}
+.qprog-n{font-size:14.5px;font-weight:650}
+.qprog-wait{color:var(--warn);font-size:12.5px;margin-top:6px;line-height:1.45}
+.qprog-ok{color:var(--ok);font-size:12.5px;margin-top:6px}
+.qtable td{vertical-align:middle}
+.qcallwrap{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:240px}
+.qagree{display:inline;margin:0}
+.qcall{min-width:200px;max-width:100%}
+.qchg{display:inline-block;margin-left:8px;vertical-align:middle;max-width:100%}
+.qchg summary{cursor:pointer;font-size:11.5px;color:var(--mut);white-space:nowrap}
+.qchg select{display:block;margin-top:6px;min-width:200px;max-width:100%}
+.qsave{margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 @media(max-width:680px){.drw{max-width:100%}.drw-body{padding:18px 16px 32px}}
 /* Under 900px the rail becomes a top bar, exactly as the static page does it:
    the same six links in one scrolling row, brand left, Sign out right. */
@@ -448,6 +464,14 @@ body.drw-open{overflow:hidden}
   form.filters .skuroll select{width:auto;flex:0 0 auto}
   .mix{overflow:hidden}
   .mixgrid{grid-template-columns:minmax(0,1fr)}
+  /* Quality sample: the Agree button sits above its dropdown inside the cell,
+     so the table is not sized by a 240px control row on a phone. The call
+     column keeps a usable width (the card scrolls, the page does not). */
+  .qcallwrap{flex-direction:column;align-items:stretch;min-width:0}
+  .qcallwrap button{width:100%}
+  .qtable td:last-child,.qtable th:last-child{min-width:210px}
+  .qcall,.qchg,.qchg select{min-width:0;width:100%;max-width:100%}
+  .qchg{display:block;margin:6px 0 0}
   .mixtbl{table-layout:fixed;width:100%}
   .mixtbl td.c{max-width:none;white-space:normal}
   /* The decision column is the widest thing on the New codes page: the typed
@@ -4212,14 +4236,48 @@ def sample_rows(cur, wk):
     return cur.fetchall()
 
 
+def week_monday(wk):
+    """Monday of an ISO sample week ('2026-W45') -> 2026-11-02.
+
+    The check used to be stamped with today's Monday whatever week was being
+    called, so a late call for another week landed on this week's row and the
+    unique key on week_start overwrote it. The row belongs to the week it scores.
+    """
+    try:
+        y, w = wk.split("-W")
+        return date.fromisocalendar(int(y), int(w), 1)
+    except Exception:
+        return week_start()
+
+
+def sample_progress(rows):
+    """-> (complete, usable): has every checkable row got a call?
+
+    The denominator is the prose rows. A row called "not a complaint" counts as
+    CALLED (it was looked at) but leaves the agreement denominator, so
+    completeness is acc+cor+rej == usable, not n == usable.
+    """
+    usable = len([r for r in rows if int(r.get("has_prose") or 0) == 1])
+    acc, cor, rej, _n, _skipped = sample_stats(rows)
+    return bool(usable) and acc + cor + rej == usable, usable
+
+
 def record_sample(cur, wk, sample_by=None):
-    """Roll the filled calls into quality_checks. Under 5 calls is progress, not a
-    measurement: recording 100% on n=1 would put a meaningless point on the trend."""
+    """Roll the calls into quality_checks — ONLY when the sample is complete.
+
+    A percentage needs its whole denominator. Ten calls out of 45, all of them
+    disagreements, is not 0% agreement: it is ten rows called and 35 not looked
+    at yet. Writing that as a measurement is how a partial week got published as
+    a real 0.00%. Below a complete sample this writes nothing and returns None;
+    the page shows progress instead, and the check appears the moment the last
+    checkable row is called.
+    """
     rows = sample_rows(cur, wk)
     acc, cor, rej, n, skipped = sample_stats(rows)
-    if n < 5:
+    complete, _usable = sample_progress(rows)
+    if not complete:
         return None
-    pct = round(acc * 100.0 / n, 2)
+    pct = round(acc * 100.0 / n, 2) if n else None   # every row "not a complaint"
     note = (f"weekly random sample: {acc} agreed, {cor} corrected, {rej} removed "
             f"(excluded from the denominator)")
     if skipped:
@@ -4229,7 +4287,7 @@ def record_sample(cur, wk, sample_by=None):
                    ON DUPLICATE KEY UPDATE sample_n=VALUES(sample_n),
                      agreement_pct=VALUES(agreement_pct), sample_ref=VALUES(sample_ref),
                      note=VALUES(note)""",
-                (week_start(), n, pct, sample_by, f"weekly-{wk}", note))
+                (week_monday(wk), n, pct, sample_by, f"weekly-{wk}", note))
     return pct
 
 
@@ -4237,6 +4295,7 @@ def p_quality(cur, q, msg="", ctx=None):
     wk = ensure_sample(cur)
     rows = sample_rows(cur, wk)
     acc, cor, rej, n, skipped = sample_stats(rows)
+    complete, usable = sample_progress(rows)
     pct = record_sample(cur, wk, (ctx or {}).get('who', {}).get('uid'))
     filled = acc + cor + rej
 
@@ -4250,45 +4309,90 @@ def p_quality(cur, q, msg="", ctx=None):
     codes = [c["code"] for c in approved_codes(cur)]
     trs = []
     for i, r in enumerate(rows, 1):
+        rid = r["review_id"]
+        ai = (r["ai_complaint"] or "").strip()
+        called = (r["your_call"] or "").strip()
         if int(r.get("has_prose") or 0) != 1:
             # F9: a picklist-only row has nothing to grade a label against. Asking
             # for a call that sample_stats() then throws away produces a number
             # nobody used and a checker who thinks they were ignored.
-            sel = ('<span class="pill">N/A — no customer comment</span>')
+            cell = '<span class="pill">N/A — no customer comment</span>'
+            state = "na"
         else:
-            sel = (f'<select name="call_{r["review_id"]}" style="min-width:200px">'
-                   f'<option value="">—</option>'
+            sel = (f'<select name="call_{rid}" form="qform" class="qcall">'
+                   f'<option value="">— not called —</option>'
                    f'<option value="{NOT_A_COMPLAINT}"'
-                   f'{" selected" if norm(r["your_call"]) == NOT_A_COMPLAINT else ""}>not a complaint</option>'
+                   f'{" selected" if norm(called) == NOT_A_COMPLAINT else ""}>not a complaint</option>'
                    + "".join(
-                       f'<option value="{esc(c)}"{" selected" if norm(r["your_call"]) == norm(c) else ""}>{esc(c)}</option>'
+                       f'<option value="{esc(c)}"{" selected" if norm(called) == norm(c) else ""}>{esc(c)}</option>'
                        for c in codes)
                    + "</select>")
-        trs.append(f"""<tr><td class="mono">{i}</td>
+            if called and norm(called) == norm(ai):
+                # Agreed: the state is shown, not a dropdown that looks untouched.
+                # "change" re-opens the same select if the call was wrong.
+                cell = (f'<span class="pill ok" data-agreed="1">Agreed</span>'
+                        f'<details class="qchg"><summary>change</summary>{sel}</details>')
+                state = "agreed"
+            else:
+                # One click records the AI's own label as the call. It posts the
+                # same field the handler already reads, so there is no second
+                # write path: the button IS the call.
+                btn = ""
+                if ai:
+                    btn = (f'<form method="post" action="/quality" class="qagree">'
+                           f'<input type="hidden" name="week" value="{esc(wk)}">'
+                           f'<button class="primary" name="call_{rid}" value="{esc(ai)}"'
+                           f' title="Agree: record the call as {esc(ai)}">Agree</button></form>')
+                cell = f'<div class="qcallwrap">{btn}{sel}</div>'
+                state = "corrected" if called else "none"
+        trs.append(f"""<tr data-call-state="{state}"><td class="mono">{i}</td>
           <td class="mono">{esc(r["review_date"])}</td>
           <td>{product_cell(r)}</td>
           <td>{amz_sku(r["sku"])}</td>
           <td class="meta" style="white-space:normal;min-width:280px">{text_snippet(r["txt"], 120)} <a href="/review/{r['review_id']}">full</a></td>
           <td><b>{esc(r["ai_complaint"] or "—")}</b><div class="meta">{esc(r["final_category"] or "")}</div></td>
-          <td>{sel}</td></tr>""")
+          <td>{cell}</td></tr>""")
 
     trend = "".join(
         f'<tr><td class="mono">{esc(c["week_start"])}</td><td class="mono num">{c["sample_n"]}</td>'
-        f'<td class="mono num">{c["agreement_pct"]}%</td><td class="meta">{esc(c["note"] or "")}</td></tr>'
+        f'<td class="mono num">{(str(c["agreement_pct"]) + "%") if c["agreement_pct"] is not None else "—"}</td>'
+        f'<td class="meta">{esc(c["note"] or "")}</td></tr>'
         for c in checks)
 
-    if pct is not None:
-        head, note = f"{pct}%", f"n={n} of {len(rows)} called" + (
+    if complete and pct is not None:
+        head, note = f"{pct}%", f"all {usable} checkable rows called" + (
             f" · {skipped} code-only excluded" if skipped else "")
-    elif filled:
-        head, note = f"{filled}/{len(rows)}", "called — agreement records at 5+"
+    elif complete:
+        head, note = f"{filled} of {usable}", "called — every row was marked not a complaint, so no agreement denominator"
     else:
-        head, note = f"0/{len(rows)}", f"drawn for {wk} — no calls yet"
+        head = f"{filled} of {usable}"
+        note = "called — not scored until every checkable row has a call"
+
+    # Progress above the table: how far the sample has got, said in calls and
+    # never as a percentage. A partial set has no agreement figure.
+    prog = (f'<div class="qprog"><div class="qprog-n">'
+            f'{filled} of {usable} called · {acc} agreed · {cor} corrected · '
+            f'{rej} not a complaint</div>')
+    if complete and pct is not None:
+        prog += (f'<div class="qprog-ok">Sample complete — agreement {pct}% over '
+                 f'{n} scored row(s)'
+                 + (f'; {skipped} code-only row(s) excluded' if skipped else '')
+                 + '.</div>')
+    elif complete:
+        prog += ('<div class="qprog-ok">Sample complete — every row was marked not '
+                 'a complaint, so there is no agreement figure to record.</div>')
+    else:
+        prog += (f'<div class="qprog-wait">This week is not scored until every '
+                 f'checkable row has a call — {usable - filled} left. No percentage '
+                 f'is shown or recorded from a partial sample.</div>')
+    prog += "</div>"
 
     body = f"""<h1>Quality</h1>
 <p class="sub">The weekly random check: {SAMPLE_N} complaint records drawn at random from the classified corpus,
 stratified by complaint category so a small but important category is not swamped by FBA returns.
-Record the call for each row — the agreement is computed from your calls, there is no percentage to type.
+Press <b>Agree</b> when the AI's label is right — that is the whole call, one click. Use the
+dropdown only to disagree: a different code, or “not a complaint”. A blank choice reads
+<b>— not called —</b> and means exactly that: not looked at yet, not agreement.
 “Not a complaint” leaves the denominator, exactly as in the sheet workflow. <b>The sample is drawn only
 from records that carry a customer comment from {esc(PROSE_POOL_FROM)}</b>; before that the pool was the
 whole corpus, so this week ({esc(wk)}) still carries {skipped} picklist-only
@@ -4302,14 +4406,15 @@ reach are still auditable.</p>
     <div class="d">not accuracy — share of complaint records a human has decided</div></div>
 </div>
 <h2>This week's sample</h2>
-<form method="post" action="/quality">
-<input type="hidden" name="week" value="{esc(wk)}">
-<div class="card"><table><thead><tr><th>#</th><th>Date</th><th>Product</th><th>SKU</th>
+{prog}
+<div class="card qtable"><table><thead><tr><th>#</th><th>Date</th><th>Product</th><th>SKU</th>
 <th>Review</th><th>AI said</th><th>Your call</th></tr></thead>
 <tbody>{''.join(trs) or '<tr><td colspan="7" class="empty">No sample drawn yet.</td></tr>'}</tbody></table></div>
-<div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-  <button class="primary">Save calls</button>
-  <span class="meta">{acc} agreed · {cor} corrected · {rej} not a complaint (excluded)</span>
+<form id="qform" method="post" action="/quality">
+<input type="hidden" name="week" value="{esc(wk)}">
+<div class="qsave">
+  <button class="primary" type="submit">Save calls</button>
+  <span class="meta">Saves the dropdowns on this page. <b>Agree</b> saves itself in one click.</span>
 </div></form>
 <h2>Weekly trend</h2>
 <div class="card"><table><thead><tr><th>Week</th><th class="num">Sample</th><th class="num">Agreement</th><th>Note</th></tr></thead>
@@ -4334,9 +4439,16 @@ def do_quality(cur, environ, who):
                     (v[:120], (who or {}).get("uid"), wk, rid))
         n += 1
     pct = record_sample(cur, wk, (who or {}).get("uid"))
-    if pct is not None:
-        return f"Saved {n} call(s); week {wk} agreement {pct}%.", False
-    return f"Saved {n} call(s); agreement is recorded once at least 5 rows are called.", False
+    rows = sample_rows(cur, wk)
+    complete, usable = sample_progress(rows)
+    acc, cor, rej, _n, _skip = sample_stats(rows)
+    if complete:
+        if pct is None:
+            return (f"Saved {n} call(s); week {wk} is complete — every row was marked "
+                    f"not a complaint, so there is no agreement figure."), False
+        return f"Saved {n} call(s); week {wk} is complete — agreement {pct}%.", False
+    return (f"Saved {n} call(s); {acc + cor + rej} of {usable} checkable rows called. "
+            f"The week is not scored until every one of them has a call."), False
 
 
 # ---------------------------------------------------------------- rules
