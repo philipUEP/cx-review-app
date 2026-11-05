@@ -42,7 +42,13 @@ import pymysql
 RUN_ID = "backlog-2026-10-17"
 PROMPT_VERSION = "v3-nocatchall"
 MODEL = "deepseek-chat"
-CSV_PATH = "data/v3_output.csv"
+# The classifier writes TWO files: the original backlog run and, since the prompt
+# change, everything it classifies into v3_output_nad.csv. Reading only the first
+# left ~6,900 classifications stranded on disk while the dashboards showed 22,228.
+# Both are read, keyed on review_id, and the later file wins because it is the one
+# produced by the live prompt.
+CSV_PATHS = ["data/v3_output.csv", "data/v3_output_nad.csv"]
+CSV_PATH = " + ".join(CSV_PATHS)
 
 
 def prompt_hash():
@@ -120,8 +126,20 @@ def main():
         charset="utf8mb4")
     cur = conn.cursor()
 
-    rows = list(csv.DictReader(open(CSV_PATH, encoding="utf-8-sig")))
-    print(f"source rows: {len(rows)}")
+    merged = {}
+    for _p in CSV_PATHS:
+        if not os.path.exists(_p):
+            print(f"WARN: {_p} missing, skipping", file=sys.stderr)
+            continue
+        _n = 0
+        for _r in csv.DictReader(open(_p, encoding="utf-8-sig")):
+            _rid = (_r.get("review_id") or "").strip()
+            if _rid:
+                merged[_rid] = _r
+                _n += 1
+        print(f"  {_p}: {_n} rows")
+    rows = list(merged.values())
+    print(f"source rows: {len(rows)} (unique across {len(CSV_PATHS)} file(s))")
 
     if args.report:
         csv_ids = {int(r["review_id"]) for r in rows if (r.get("review_id") or "").strip()}
