@@ -638,6 +638,34 @@ td.txt .prose{display:block;margin-top:2px}
  th,td{padding:8px 8px}
 }
 @media(max-width:430px){.f.grow{flex:1 1 100%}.f select{min-width:0;width:100%}.f input{width:100%}.f{flex:1 1 140px}}
+/* Multi-select filter control: same widget, same behaviour as the app. The
+   button summarises the choice; the panel holds a search box, Select all /
+   Clear and one checkbox row per value with its corpus count. */
+.ms{position:relative;max-width:100%;min-width:0}
+.msbtn{display:flex;align-items:center;gap:6px;width:100%;min-width:150px;max-width:210px;
+  padding:6px 9px;border:1px solid #d4d8df;border-radius:7px;background:#fff;color:var(--ink);
+  font:inherit;font-size:13px;cursor:pointer;text-align:left;line-height:1.3}
+.msbtn:hover{border-color:#b9c0cb}
+.msbtn:focus-visible{outline:2px solid #dbeafe;border-color:#1a56db}
+.msbtn .mss{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msbtn .msc{font-style:normal;color:#6b7280;font-size:10px}
+.ms.on .msbtn{border-color:#1a56db;box-shadow:0 0 0 2px rgba(26,86,219,.12)}
+.msp{position:absolute;z-index:60;top:calc(100% + 4px);left:0;width:290px;max-width:calc(100vw - 36px);
+  background:#fff;border:1px solid #d4d8df;border-radius:9px;box-shadow:0 12px 28px rgba(16,24,40,.18);padding:8px}
+.msq{width:100% !important;padding:6px 8px;border:1px solid #d4d8df;border-radius:6px;
+  font:inherit;font-size:13px;margin:0 0 6px;box-sizing:border-box}
+.msa{display:flex;gap:8px;align-items:center;margin:0 0 6px}
+.msa button{background:none;border:0;padding:2px 3px;color:#1a56db;font:inherit;font-size:12px;
+  cursor:pointer;text-decoration:underline}
+.msn{margin-left:auto;color:#6b7280;font-size:11.5px}
+.msl{max-height:250px;overflow:auto}
+.msopt{display:flex;gap:8px;align-items:center;padding:5px 6px;border-radius:5px;cursor:pointer;font-size:13px}
+.msopt:hover{background:#f4f6f9}
+.msopt input{flex:none;margin:0;width:auto}
+.msopt .mst{flex:1;min-width:0;overflow-wrap:anywhere}
+.msopt em{font-style:normal;color:#6b7280;font-size:11.5px;flex:none}
+.msnone{color:#6b7280;font-size:12.5px;padding:8px 6px}
+@media(max-width:430px){.msbtn{max-width:100%}.msp{width:calc(100vw - 40px);max-width:320px}}
 </style></head><body>
 <div class="wrap">
 <aside>
@@ -662,9 +690,17 @@ td.txt .prose{display:block;margin-top:2px}
     </div>
     <div class="quick" id="quick" role="group" aria-label="Quick filters"></div>
     <div class="filters">
-      <div class="f"><label for="famsel">Family</label>
-        <select id="famsel" data-f="fam"><option value="">All product families</option>__FAMOPTIONS__</select></div>
-      <div class="f"><label for="datesel">Date</label>
+      <div class="f"><label id="lbl-fam">Family</label>
+        <div class="ms" data-ms data-key="fam" data-label="family" data-any="All product families"></div></div>
+      <div class="f"><label id="lbl-sku">SKU</label>
+        <div class="ms" data-ms data-key="s" data-label="SKU" data-any="All SKUs"></div></div>
+      <div class="f"><label id="lbl-mk">Marketplace</label>
+        <div class="ms" data-ms data-key="ct" data-label="marketplace" data-any="All marketplaces"></div></div>
+      <div class="f"><label for="f-from">From</label>
+        <input id="f-from" type="date" data-f="from"></div>
+      <div class="f"><label for="f-to">To</label>
+        <input id="f-to" type="date" data-f="to"></div>
+      <div class="f"><label for="datesel">Month</label>
         <input id="datesel" data-f="d" placeholder="all dates · YYYY-MM" aria-label="Month, YYYY-MM"></div>
       <div class="f"><label for="winsel">Range</label>
         <select id="winsel" data-f="win" aria-label="Recent months"><option value="">all</option><option value="3">last 3 months</option><option value="6">last 6 months</option><option value="12">last 12 months</option></select></div>
@@ -676,8 +712,10 @@ td.txt .prose{display:block;margin-top:2px}
         <select id="labelsel" data-f="lb" aria-label="Label provenance"><option value="">Any</option><option value="ai">AI Classified</option><option value="human">Human Classified</option><option value="excluded">Excluded</option></select></div>
       <div class="f"><label for="reviewsel">Review</label>
         <select id="reviewsel" data-f="rv" aria-label="Review state"><option value="">Any</option><option value="needreview">Needs review</option><option value="nolabel">No label</option><option value="newcode">New code</option><option value="decided">Decided</option></select></div>
-      <div class="f"><label for="srcsel">Source</label>
-        <select id="srcsel" data-f="src"><option value="">All sources</option></select></div>
+      <div class="f"><label id="lbl-src">Source</label>
+        <div class="ms" data-ms data-key="src" data-label="source" data-any="All sources"></div></div>
+      <div class="f"><label id="lbl-fc">Complaint</label>
+        <div class="ms" data-ms data-key="fc" data-label="complaint" data-any="All complaints"></div></div>
       <div class="f"><label for="rtsel">Rating</label>
         <select id="rtsel" data-f="rt" aria-label="Star rating"><option value="">Any</option></select></div>
       <div class="f grow"><label for="qsel">Search</label>
@@ -712,9 +750,9 @@ td.txt .prose{display:block;margin-top:2px}
             <th></th>
             <th></th>
             <th><input data-f="a" placeholder="filter"></th>
-            <th><input data-f="s" placeholder="filter"></th>
             <th></th>
-            <th><select data-f="fc"><option value="">All</option></select></th>
+            <th></th>
+            <th></th>
             <th></th>
           </tr>
         </thead>
@@ -1009,12 +1047,14 @@ function trimMonths(list){
    produced a Too Firm complaint, so every one of them is exposure. */
 function salesScope(raw){
   const meta=(MIX&&MIX.sku_meta)||{};
-  const pr=(raw.pr||"").toLowerCase(), sk=(raw.s||"").toLowerCase(), fam=raw.fam||"";
+  const pr=(raw.pr||"").toLowerCase();
+  const skus=Array.isArray(raw.s)?raw.s:[];
+  const fams=Array.isArray(raw.fam)?raw.fam:(raw.fam?[raw.fam]:[]);
   return Object.keys(meta).filter(k=>{
     const m=meta[k]||[];
-    if(fam && m[0]!==fam) return false;
+    if(fams.length && fams.indexOf(m[0])===-1) return false;
     if(pr && !String(m[2]||"").toLowerCase().includes(pr)) return false;
-    if(sk && !k.toLowerCase().includes(sk)) return false;
+    if(skus.length && skus.indexOf(k)===-1) return false;
     return true;
   });
 }
@@ -1552,14 +1592,139 @@ function openRow(id){
   document.getElementById("detail").scrollIntoView({behavior:"smooth",block:"start"});
 }
 
+/* ---- multi-select filter control -------------------------------------
+   One control per dimension: a button that summarises the choice, a panel
+   with a search box, Select all / Clear and one checkbox row per value with
+   its corpus count. Values inside a control are OR ('any of these'); separate
+   controls are AND. The export reads VIEW, so the CSV and the table cannot
+   disagree about what is filtered. */
+const MARKETPLACE={US:"AMAZON.COM",CA:"AMAZON.CA",MX:"AMAZON.COM.MX",UK:"AMAZON.CO.UK",
+  DE:"AMAZON.DE",FR:"AMAZON.FR",IT:"AMAZON.IT",ES:"AMAZON.ES",NL:"AMAZON.NL",
+  BE:"AMAZON.COM.BE",SE:"AMAZON.SE",PL:"AMAZON.PL",JP:"AMAZON.CO.JP"};
+function msRoots(){return [].slice.call(document.querySelectorAll('[data-ms]'));}
+function msBoxes(root){return [].slice.call(root.querySelectorAll('.msl input[type=checkbox]'));}
+function msVal(root){return msBoxes(root).filter(b=>b.checked).map(b=>b.value);}
+function msPanel(root){return root.querySelector('.msp');}
+function msBtn(root){return root.querySelector('.msbtn');}
+function msSum(root){
+  const on=msBoxes(root).filter(b=>b.checked), out=root.querySelector('.mss');
+  if(!out) return;
+  if(!on.length) out.textContent=root.dataset.any||"Any";
+  else if(on.length===1){
+    const row=on[0].closest('.msopt'), t=row&&row.querySelector('.mst');
+    out.textContent=t?t.textContent:on[0].value;
+  } else out.textContent=on.length+" selected";
+  root.classList.toggle("on",on.length>0);
+}
+function msCount(root){
+  const rows=[].slice.call(root.querySelectorAll('.msopt'));
+  const shown=rows.filter(r=>!r.hidden).length, n=root.querySelector('.msn');
+  if(n) n.textContent=(shown===rows.length?rows.length+" options":shown+" of "+rows.length);
+  const none=root.querySelector('.msnone'); if(none) none.hidden=shown!==0;
+}
+function msFilter(root,term){
+  term=(term||"").trim().toLowerCase();
+  [].slice.call(root.querySelectorAll('.msopt')).forEach(row=>{
+    const box=row.querySelector('input');
+    const hay=(row.querySelector('.mst').textContent+" "+box.value).toLowerCase();
+    row.hidden=!!term&&hay.indexOf(term)===-1;
+  });
+  msCount(root);
+}
+function msClose(root){
+  const p=msPanel(root); if(!p||p.hidden) return;
+  p.hidden=true; msBtn(root).setAttribute("aria-expanded","false");
+}
+function msPlace(root){
+  /* A 320px panel opened from a control near the right edge of a phone would
+     add a horizontal scrollbar, so slide it back inside the viewport.
+     visualViewport, not innerWidth: the layout viewport grows to fit the
+     overflow, so innerWidth would report the very overflow being measured. */
+  const p=msPanel(root), b=msBtn(root);
+  if(!p||p.hidden) return;
+  p.style.left="0px";
+  const vw=(window.visualViewport&&window.visualViewport.width)||window.innerWidth;
+  const w=p.getBoundingClientRect().width, r=b.getBoundingClientRect();
+  let left=0;
+  if(r.left+w>vw-8) left=(vw-8)-w-r.left;
+  if(r.left+left<8) left=8-r.left;
+  p.style.left=Math.round(left)+"px";
+}
+function msOpen(root){
+  msRoots().forEach(r=>{if(r!==root)msClose(r);});
+  const p=msPanel(root), q=root.querySelector('.msq');
+  p.hidden=false; msBtn(root).setAttribute("aria-expanded","true");
+  msPlace(root);
+  if(q){q.value="";msFilter(root,"");q.focus();}
+}
+function msWire(root){
+  const b=msBtn(root), p=msPanel(root), q=root.querySelector('.msq');
+  b.addEventListener("click",e=>{e.preventDefault();p.hidden?msOpen(root):msClose(root);});
+  b.addEventListener("keydown",e=>{if(e.key==="ArrowDown"){e.preventDefault();msOpen(root);}});
+  if(q) q.addEventListener("input",()=>msFilter(root,q.value));
+  p.addEventListener("keydown",e=>{
+    if(e.key==="Escape"){e.preventDefault();e.stopPropagation();msClose(root);b.focus();}
+  });
+  p.addEventListener("change",e=>{if(e.target&&e.target.type==="checkbox")msSum(root);});
+  const all=p.querySelector("[data-msall]"), none=p.querySelector("[data-msnone]");
+  if(all) all.addEventListener("click",()=>{
+    [].slice.call(p.querySelectorAll('.msopt')).forEach(row=>{if(!row.hidden)row.querySelector('input').checked=true;});
+    msSum(root);
+  });
+  if(none) none.addEventListener("click",()=>{
+    msBoxes(root).forEach(x=>{x.checked=false;}); msSum(root);
+  });
+}
+function msSkeleton(root){
+  const key=root.dataset.key, label=root.dataset.label||key, any=root.dataset.any||"Any";
+  const id="ms-"+key;
+  root.innerHTML=
+    '<button type="button" class="msbtn" id="'+id+'" aria-haspopup="true" aria-expanded="false" aria-controls="'+id+'-p">'+
+      '<span class="mss">'+esc(any)+'</span><i class="msc" aria-hidden="true">▾</i></button>'+
+    '<div class="msp" id="'+id+'-p" role="group" aria-label="'+esc(label)+'" hidden>'+
+      '<input type="search" class="msq" placeholder="Search '+esc(label.toLowerCase())+'…" aria-label="Search '+esc(label)+'" autocomplete="off">'+
+      '<div class="msa"><button type="button" data-msall>Select all</button>'+
+      '<button type="button" data-msnone>Clear</button><span class="msn" aria-live="polite"></span></div>'+
+      '<div class="msl"></div><div class="msnone" hidden>Nothing matches that search.</div></div>';
+  msWire(root);
+}
+function msFill(root,items){
+  /* items: [{v,l,n}] — v is the value compared against the data, l the label
+     the reader sees, n the corpus count. Alphabetical by label, because a
+     picker is a lookup, not a ranking. */
+  items=items.slice().sort((a,b)=>String(a.l).localeCompare(String(b.l),"en",
+        {numeric:true,sensitivity:"base"}));
+  const list=root.querySelector('.msl');
+  list.innerHTML=items.map(it=>'<label class="msopt"><input type="checkbox" value="'+esc(it.v)+
+    '" data-lbl="'+esc(String(it.l).toLowerCase())+'"><span class="mst">'+esc(it.l)+
+    '</span><em>'+nfmt(it.n)+'</em></label>').join("");
+  msSum(root); msCount(root);
+}
+function msFillBy(root,key,labelFn){
+  const cnt={};
+  ROWS.forEach(r=>{const v=r[key]; if(v!==null&&v!==undefined&&v!=="") cnt[v]=(cnt[v]||0)+1;});
+  msFill(root,Object.keys(cnt).map(v=>({v:v,l:labelFn?labelFn(v):v,n:cnt[v]})));
+}
+document.addEventListener("keydown",e=>{
+  if(e.key!=="Escape") return;
+  const open=msRoots().filter(r=>msPanel(r)&&!msPanel(r).hidden)[0];
+  if(open){msClose(open);msBtn(open).focus();}
+});
+document.addEventListener("click",e=>{
+  msRoots().forEach(r=>{if(!r.contains(e.target))msClose(r);});
+});
+
 function apply(){
   // Keep the raw select values: exact-match filters compare against data that is
   // mixed case ('Noisy'), so lowercasing the filter made every complaint filter
   // return nothing. Substring filters lowercase both sides explicitly.
   const raw={}; document.querySelectorAll("[data-f]").forEach(el=>raw[el.dataset.f]=el.value.trim());
-  const low=k=>(raw[k]||"").toLowerCase();
+  /* A multi-select posts a list; an empty list means 'any'. Both form shapes
+     land in the same key, so keepRow has one rule to read. */
+  document.querySelectorAll("[data-ms]").forEach(r=>{raw[r.dataset.key]=msVal(r);});
+  const low=k=>{const v=raw[k];return (typeof v==="string"?v:"").toLowerCase();};
   let cut=0;
-  if(raw.win){
+  if(raw.win && !raw.from && !raw.to){
     const maxm=ROWS.reduce((m,r)=>Math.max(m,monthNum(r.mon)),0);
     cut=maxm-(parseInt(raw.win,10)-1);
   }
@@ -1579,24 +1744,29 @@ function apply(){
    so a filter cannot apply on screen and silently not apply to a comparison.
    skipDate drops `d` and `win` — used only for the preceding-window scope. */
 function keepRow(r,raw,low,cut,skipDate){
+  const anyOf=(list,v)=>!list||!list.length||list.indexOf(v||"")!==-1;
   if(!skipDate){
+    if(raw.from && (r.d||"")<raw.from) return false;
+    if(raw.to && (r.d||"")>raw.to) return false;
     if(low("d") && !(r.d||"").toLowerCase().includes(low("d"))) return false;
     if(cut && monthNum(r.mon)<cut) return false;
   }
   if(low("pr") && !(r.pr||"").toLowerCase().includes(low("pr"))) return false;
   if(low("p") && !(r.p||"").toLowerCase().includes(low("p"))) return false;
-  if(low("s") && !(r.s||"").toLowerCase().includes(low("s"))) return false;
+  /* SKU, Marketplace, Family, Source and Complaint are multi-select: any of
+     the chosen values matches, and an empty control matches everything. */
+  if(!anyOf(raw.s,r.s)) return false;
   if(low("a") && !(r.a||"").toLowerCase().includes(low("a"))) return false;
   if(low("id") && !String(r.id).includes(low("id"))) return false;
   if(low("o") && !(r.o||"").toLowerCase().includes(low("o"))) return false;
   if(low("cat") && !(r.cat||"").toLowerCase().includes(low("cat"))) return false;
-  if(raw.ct && (r.ct||"")!==raw.ct) return false;
-  if(raw.src && (r.src||"")!==raw.src) return false;
+  if(!anyOf(raw.ct,r.ct)) return false;
+  if(!anyOf(raw.src,r.src)) return false;
   /* A specific star excludes rows with no rating; 'Any' keeps them. */
   if(raw.rt && String(r.rt==null?"":r.rt)!==raw.rt) return false;
-  if(raw.fc && (r.fc||"")!==raw.fc) return false;
+  if(!anyOf(raw.fc,r.fc)) return false;
   if(low("q") && !(r.t||"").toLowerCase().includes(low("q"))) return false;
-  if(raw.fam && (r.fam||"")!==raw.fam) return false;
+  if(!anyOf(raw.fam,r.fam)) return false;
   /* Label = provenance: whose badge the row carries. Review = what still wants a
      person. Two questions, two controls, and they compose: AI Classified +
      Needs review is every low-confidence call nobody has looked at yet. */
@@ -1619,15 +1789,23 @@ document.getElementById("next").onclick=()=>{if((page+1)*PER<VIEW.length){page++
 fetch("data/reviews.json").then(r=>r.json()).then(d=>{
   ROWS=d.rows; VIEW=ROWS;
   SRCLABEL=Object.assign({},SRCLABEL,d.src_label||{});
-  const ct=new Set(), src=new Set(), rt=new Set();
-  ROWS.forEach(r=>{if(r.ct)ct.add(r.ct); if(r.src)src.add(r.src); if(r.rt!=null)rt.add(r.rt)});
-  const srcSel=document.querySelector('[data-f="src"]'), fcSel=document.querySelector('[data-f="fc"]');
+  const rt=new Set();
+  ROWS.forEach(r=>{if(r.rt!=null)rt.add(r.rt)});
+  /* One control per dimension, filled from the payload: a hard-coded option
+     list would rot the next time the classifier or the feeds change. */
+  msRoots().forEach(root=>{
+    msSkeleton(root);
+    const key=root.dataset.key;
+    if(key==="s") msFillBy(root,"s");
+    else if(key==="fam") msFillBy(root,"fam");
+    else if(key==="ct") msFillBy(root,"ct",v=>MARKETPLACE[v]||v);
+    else if(key==="src") msFillBy(root,"src",v=>SRCLABEL[v]||v);
+    else if(key==="fc") msFillBy(root,"fc",v=>nice(v));
+  });
   const rtSel=document.querySelector('[data-f="rt"]');
-  if(srcSel) [...src].sort().forEach(v=>srcSel.insertAdjacentHTML("beforeend",`<option value="${esc(v)}">${esc(SRCLABEL[v]||v)}</option>`));
   /* One option per star value actually present, so a 4-star record can never be
      unfilterable just because the menu was hardcoded to 1-3. */
   if(rtSel) [...rt].sort((a,b)=>a-b).forEach(v=>rtSel.insertAdjacentHTML("beforeend",`<option value="${v}">${v} star</option>`));
-  if(fcSel) Object.values(CATS).flat().forEach(o=>fcSel.insertAdjacentHTML("beforeend",`<option value="${esc(o.c)}">${esc(o.c)}</option>`));
   /* The counts come from the payload, not the markup: a hard-coded number in the
      template would silently rot the next time the classifier runs. */
   const rvSel=document.querySelector('[data-f="rv"]');

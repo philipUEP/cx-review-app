@@ -500,6 +500,169 @@ body.drw-open{overflow:hidden}
 }
 """
 
+# The multi-select filter control. One CSS block for both surfaces, because the
+# same widget must look and behave the same on the app and the read-only page.
+MULTI_CSS = """
+/* html.js is set by an inline head script; with scripting off the button and
+   its panel are hidden and the <noscript> multiple select is what shows. */
+html:not(.js) .ms .msbtn,html:not(.js) .ms .msp{display:none}
+.ms{position:relative;max-width:100%;min-width:0}
+.msbtn{display:flex;align-items:center;gap:6px;width:100%;min-width:150px;max-width:260px;
+  padding:7px 10px;border:1px solid #d4d8df;border-radius:7px;background:#fff;color:#1f2430;
+  font:inherit;font-size:13.5px;cursor:pointer;text-align:left;line-height:1.3}
+.msbtn:hover{border-color:#b9c0cb}
+.msbtn:focus-visible{outline:2px solid #dbeafe;border-color:#1a56db}
+.msbtn .mss{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msbtn .msc{font-style:normal;color:#6b7280;font-size:10px}
+.ms.on .msbtn{border-color:#1a56db;box-shadow:0 0 0 2px rgba(26,86,219,.12)}
+.msp{position:absolute;z-index:60;top:calc(100% + 4px);left:0;width:290px;max-width:calc(100vw - 36px);
+  background:#fff;border:1px solid #d4d8df;border-radius:9px;box-shadow:0 12px 28px rgba(16,24,40,.18);padding:8px}
+.msq{width:100% !important;padding:6px 8px;border:1px solid #d4d8df;border-radius:6px;
+  font:inherit;font-size:13px;margin:0 0 6px;box-sizing:border-box}
+.msa{display:flex;gap:8px;align-items:center;margin:0 0 6px}
+.msa button{background:none;border:0;padding:2px 3px;color:#1a56db;font:inherit;font-size:12px;
+  cursor:pointer;text-decoration:underline}
+.msa button:hover{color:#1748b6}
+.msn{margin-left:auto;color:#6b7280;font-size:11.5px}
+.msl{max-height:250px;overflow:auto}
+.msopt{display:flex;gap:8px;align-items:center;padding:5px 6px;border-radius:5px;cursor:pointer;font-size:13px}
+.msopt:hover{background:#f4f6f9}
+.msopt input{flex:none;margin:0}
+.msopt .mst{flex:1;min-width:0;overflow-wrap:anywhere}
+.msopt em{font-style:normal;color:#6b7280;font-size:11.5px;flex:none}
+.msnone{color:#6b7280;font-size:12.5px;padding:8px 6px}
+.ms select[multiple]{width:100%;min-height:118px;padding:4px;border:1px solid #d4d8df;
+  border-radius:6px;font:inherit;font-size:13px;box-sizing:border-box}
+.df .msbtn{max-width:220px}
+.df .msq{width:100%}
+@media(max-width:900px){.msbtn{max-width:100%}.msp{width:calc(100vw - 40px);max-width:320px}}
+"""
+
+
+# The control's client half. Progressive enhancement only: the form still
+# submits on Apply, and every checked box is a real input, so nothing here is
+# required for the filter to work.
+MULTI_JS = """<script>
+(function () {
+  var roots = [].slice.call(document.querySelectorAll('[data-ms]'));
+  if (!roots.length) return;
+
+  function boxes(root) { return [].slice.call(root.querySelectorAll('.msl input[type=checkbox]')); }
+  function panel(root) { return root.querySelector('.msp'); }
+  function btn(root) { return root.querySelector('.msbtn'); }
+
+  function summarise(root) {
+    var on = boxes(root).filter(function (b) { return b.checked; });
+    var out = root.querySelector('.mss');
+    if (!on.length) out.textContent = root.dataset.any || 'Any';
+    else if (on.length === 1) {
+      var row = on[0].closest('.msopt'), t = row && row.querySelector('.mst');
+      out.textContent = t ? t.textContent : on[0].value;
+    } else out.textContent = on.length + ' selected';
+    root.classList.toggle('on', on.length > 0);
+  }
+  function countShown(root) {
+    var rows = [].slice.call(root.querySelectorAll('.msopt'));
+    var shown = rows.filter(function (r) { return !r.hidden; }).length;
+    var n = root.querySelector('.msn');
+    if (n) n.textContent = shown === rows.length ? rows.length + ' options'
+      : shown + ' of ' + rows.length;
+    var none = root.querySelector('.msnone');
+    if (none) none.hidden = shown !== 0;
+  }
+  function open(root) {
+    closeAll(root);
+    var p = panel(root);
+    p.hidden = false;
+    btn(root).setAttribute('aria-expanded', 'true');
+    place(root);
+    var q = root.querySelector('.msq');
+    if (q) { q.value = ''; filter(root, ''); q.focus(); }
+  }
+  /* A 320px panel opened from a control near the right edge of a phone is a
+     horizontal scrollbar. Slide it back inside the viewport instead. */
+  function place(root) {
+    var p = panel(root), b = btn(root);
+    if (!p || p.hidden) return;
+    p.style.left = '0px';
+    /* visualViewport, not innerWidth: on a phone the layout viewport grows to
+       fit an overflowing panel, so innerWidth reports the overflow it is
+       supposed to be measuring against. */
+    var vw = (window.visualViewport && window.visualViewport.width) || window.innerWidth;
+    var w = p.getBoundingClientRect().width, r = b.getBoundingClientRect();
+    var left = 0;
+    if (r.left + w > vw - 8) left = (vw - 8) - w - r.left;
+    if (r.left + left < 8) left = 8 - r.left;
+    p.style.left = Math.round(left) + 'px';
+  }
+  window.addEventListener('resize', function () {
+    roots.forEach(function (r) { if (!panel(r).hidden) place(r); });
+  });
+  function close(root) {
+    var p = panel(root);
+    if (!p || p.hidden) return;
+    p.hidden = true;
+    btn(root).setAttribute('aria-expanded', 'false');
+  }
+  function closeAll(except) {
+    roots.forEach(function (r) { if (r !== except) close(r); });
+  }
+  function filter(root, term) {
+    term = (term || '').trim().toLowerCase();
+    [].slice.call(root.querySelectorAll('.msopt')).forEach(function (row) {
+      var box = row.querySelector('input');
+      var hay = (row.querySelector('.mst').textContent + ' ' + (box.dataset.lbl || '')
+                 + ' ' + box.value).toLowerCase();
+      row.hidden = !!term && hay.indexOf(term) === -1;
+    });
+    countShown(root);
+  }
+
+  roots.forEach(function (root) {
+    var b = btn(root), p = panel(root), q = root.querySelector('.msq');
+    if (!b || !p) return;
+    b.addEventListener('click', function (e) {
+      e.preventDefault();
+      if (p.hidden) open(root); else close(root);
+    });
+    b.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); open(root); }
+    });
+    if (q) q.addEventListener('input', function () { filter(root, q.value); });
+    p.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(root); b.focus(); }
+    });
+    p.addEventListener('change', function (e) {
+      if (e.target && e.target.type === 'checkbox') summarise(root);
+    });
+    var all = p.querySelector('[data-msall]'), none = p.querySelector('[data-msnone]');
+    if (all) all.addEventListener('click', function () {
+      [].slice.call(p.querySelectorAll('.msopt')).forEach(function (row) {
+        if (!row.hidden) row.querySelector('input').checked = true;
+      });
+      summarise(root);
+    });
+    if (none) none.addEventListener('click', function () {
+      boxes(root).forEach(function (x) { x.checked = false; });
+      summarise(root);
+    });
+    summarise(root);
+    countShown(root);
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    var openRoot = roots.filter(function (r) { return !panel(r).hidden; })[0];
+    if (openRoot) { close(openRoot); btn(openRoot).focus(); }
+  });
+  document.addEventListener('click', function (e) {
+    roots.forEach(function (r) {
+      if (!r.contains(e.target)) close(r);
+    });
+  });
+})();
+</script>"""
+
 
 # The drawer's client half. Kept next to the page it belongs to rather than in a
 # static file: app.py is deployed on its own (deploy_on_box.sh), so an external
@@ -715,7 +878,9 @@ def page(title, body, active="", msg="", err=False, ctx=None):
         who_html = f'<div class="side-who">{ident}</div><a href="/logout">Sign out</a>'
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(title)} · AI Complaint Validation</title><style>{CSS}{ctx.get("css", "")}</style></head>
+<title>{esc(title)} · AI Complaint Validation</title>
+<script>document.documentElement.className+=' js';</script>
+<style>{CSS}{MULTI_CSS}{ctx.get("css", "")}</style></head>
 <body><div class="wrap">
 <aside class="side">
   <div class="side-brand"><img class="mark" src="/static/logo-mark-light.png" alt="UEP" width="84" height="24"><span>Complaint validation</span></div>
@@ -922,8 +1087,60 @@ def banner_html(st):
             + '</div>')
 
 
+# ---- multi-valued filters ------------------------------------------------
+# A filter dimension can carry several values ('any of these'); different
+# dimensions still AND. The URL form is repeated parameters — what every HTML
+# form and every export link emits — and the old single ?sku=A is the same
+# thing with one value, so every link saved before today parses unchanged.
+MULTI_KEYS = ("sku", "country", "source", "family", "complaint")
+
+
 def parse_qs(environ):
-    return {k: v[0] for k, v in urllib.parse.parse_qs(environ.get("QUERY_STRING", "")).items()}
+    """Query string -> filter dict.
+
+    The five multi-select dimensions hold a LIST (deduped, blanks dropped), so
+    one parser serves both ?sku=A&sku=B and the old ?sku=A. A dimension with no
+    value is absent, never '', because every caller tests truth.
+    """
+    raw = urllib.parse.parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+    q = {}
+    for k, vs in raw.items():
+        if k in MULTI_KEYS:
+            keep = []
+            for v in vs:
+                v = (v or "").strip()
+                if v and v not in keep:
+                    keep.append(v)
+            if keep:
+                q[k] = keep
+        else:
+            q[k] = vs[0]
+    return q
+
+
+def qlist(q, name):
+    """Always a list: a form posts one value, a URL may post many."""
+    v = q.get(name)
+    if not v:
+        return []
+    seq = v if isinstance(v, (list, tuple)) else [v]
+    out = []
+    for x in seq:
+        x = str(x).strip()
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+def qone(q, name):
+    """First value of a dimension, for the places that can only show one."""
+    v = qlist(q, name)
+    return v[0] if v else ""
+
+
+def _in(col, vals):
+    """(col IN (%s,%s), args) — OR within one dimension, AND across them."""
+    return col + " IN (" + ",".join(["%s"] * len(vals)) + ")", list(vals)
 
 
 def _body(environ):
@@ -1005,6 +1222,24 @@ SRC_LABEL = {"amazon": "Amazon 1-3 star review"}
 def source_label(s):
     """Display name for a stored source value. fba/ncx are returned unchanged."""
     return SRC_LABEL.get((s or "").strip().lower(), s)
+
+
+def country_label(c):
+    """Amazon marketplace name for a stored country code. Display only: the
+    value submitted and compared is still the code ('UK'), because that is what
+    the column holds and what every saved link matches."""
+    return COUNTRY_LABEL.get((c or "").strip().upper(), c)
+
+
+# The marketplaces this corpus actually sells in. A code with no entry falls
+# back to itself rather than vanishing from the picker.
+COUNTRY_LABEL = {
+    "US": "AMAZON.COM", "CA": "AMAZON.CA", "MX": "AMAZON.COM.MX",
+    "UK": "AMAZON.CO.UK", "DE": "AMAZON.DE", "FR": "AMAZON.FR",
+    "IT": "AMAZON.IT", "ES": "AMAZON.ES", "NL": "AMAZON.NL",
+    "BE": "AMAZON.COM.BE", "SE": "AMAZON.SE", "PL": "AMAZON.PL",
+    "JP": "AMAZON.CO.JP",
+}
 
 
 def rating_label(v):
@@ -1128,35 +1363,47 @@ def build_where(q):
     if q.get("product"):
         where.append("(v.product LIKE %s OR v.title LIKE %s)")
         args += [f'%{q["product"]}%'] * 2
-    if q.get("family"):
+    fams = qlist(q, "family")
+    if fams:
         # Curated product family (apply_views.PRODUCT_FAMILY): one value covers
         # every market's SKU for the same product, which a title search cannot.
-        where.append("v.product_family=%s"); args.append(q["family"])
+        cond, a = _in("v.product_family", fams)
+        where.append(cond); args += a
     if q.get("parent"):
         where.append("v.parent=%s"); args.append(q["parent"])
-    if q.get("sku"):
+    skus = qlist(q, "sku")
+    if skus:
         # F8: EXACT by default. A substring match made sku=6 return 3,655 rows
         # against 2,613 for the SKU actually called '6' — the filter silently
         # widened to '6-in-anything'. 'contains' is an explicit choice, and the
-        # page echoes the SKU values it matched.
+        # page echoes the SKU values it matched. Several SKUs are an OR.
         if q.get("skulike") == "1":
-            where.append("v.sku LIKE %s"); args.append(f'%{q["sku"]}%')
+            where.append("(" + " OR ".join(["v.sku LIKE %s"] * len(skus)) + ")")
+            args += [f"%{s}%" for s in skus]
         else:
-            where.append("v.sku=%s"); args.append(q["sku"].strip())
-    if q.get("complaint"):
+            cond, a = _in("v.sku", skus)
+            where.append(cond); args += a
+    comps = qlist(q, "complaint")
+    if comps:
         # Case-insensitive on purpose: the picklist is the TAXONOMY spelling while
         # older rows store the classifier's casing ('Not Needed/unwanted'). An exact
         # match would filter 7,861 records down to nothing.
-        where.append("LOWER(v.final_complaint)=LOWER(%s)"); args.append(q["complaint"].strip())
-    if q.get("source"):
-        where.append("v.source=%s"); args.append(q["source"])
+        where.append("LOWER(v.final_complaint) IN ("
+                     + ",".join(["LOWER(%s)"] * len(comps)) + ")")
+        args += comps
+    srcs = qlist(q, "source")
+    if srcs:
+        cond, a = _in("v.source", srcs)
+        where.append(cond); args += a
     if q.get("rating"):
         # The star the review carried. Rows with no rating (fba, ncx) drop out
         # when a star is chosen, and stay in under 'Any' — which is the truth:
         # those feeds have no stars, so they cannot match a star.
         where.append("v.rating=%s"); args.append(q["rating"])
-    if q.get("country"):
-        where.append("v.country=%s"); args.append(q["country"])
+    cts = qlist(q, "country")
+    if cts:
+        cond, a = _in("v.country", cts)
+        where.append(cond); args += a
     if q.get("month"):
         where.append("DATE_FORMAT(v.review_date,'%%Y-%%m')=%s"); args.append(q["month"])
     if q.get("from"):
@@ -1220,10 +1467,32 @@ def build_where(q):
 
 
 def qstr(q, **over):
-    d = {k: v for k, v in q.items() if v not in (None, "")}
-    d.update(over)
-    d = {k: v for k, v in d.items() if v not in (None, "")}
-    return urllib.parse.urlencode(d)
+    """Query string for links and exports.
+
+    Repeated parameters are the canonical form (?sku=A&sku=B): every browser
+    form and every export URL this app writes uses it, and the parser also
+    accepts the old single-value form, so links keep working both ways.
+    """
+    d = {}
+    for k, v in q.items():
+        if isinstance(v, (list, tuple)):
+            v = [x for x in v if x not in (None, "")]
+            if v:
+                d[k] = v
+        elif v not in (None, ""):
+            d[k] = v
+    for k, v in over.items():
+        if isinstance(v, (list, tuple)):
+            v = [x for x in v if x not in (None, "")]
+            if v:
+                d[k] = v
+            else:
+                d.pop(k, None)
+        elif v in (None, ""):
+            d.pop(k, None)
+        else:
+            d[k] = v
+    return urllib.parse.urlencode(d, doseq=True)
 
 
 def options(cur, sql, args=()):
@@ -1242,6 +1511,49 @@ def select(name, vals, cur_val, any_label="Any", sid=None):
                  f'{esc(lbl)} ({n:,})</option>')
     sid = f' id="{esc(sid)}"' if sid else ""
     return f'<select name="{name}"{sid}><option value="">{any_label}</option>{opts}</select>'
+
+
+def ms_control(name, opts, selected, any_label="Any", sid=None, label=""):
+    """A checkbox dropdown: search, Select all / Clear, one row per value with
+    its corpus count. Values within the control OR; controls AND.
+
+    opts is [(value, display label, count)]. The value is what the filter
+    compares against (a stored source, a country code); the label is what the
+    reader sees (AMAZON.CO.UK), so a display rename can never be submitted.
+
+    Without JavaScript the button and panel are hidden and the <noscript>
+    multiple <select> submits the same name with the same values: the page
+    still filters, it just looks like a list box instead of a menu.
+    """
+    sel = [str(s) for s in (selected or []) if str(s)]
+    sid = sid or f"ms-{name}"
+    if not sel:
+        summ = any_label
+    elif len(sel) == 1:
+        one = [lbl for v, lbl, _ in opts if str(v) == sel[0]]
+        summ = str(one[0]) if one else sel[0]
+    else:
+        summ = f"{len(sel)} selected"
+    rows = "".join(
+        f'<label class="msopt"><input type="checkbox" name="{esc(name)}" '
+        f'value="{esc(v)}"{" checked" if str(v) in sel else ""} '
+        f'data-lbl="{esc(str(lbl).lower())}">'
+        f'<span class="mst">{esc(lbl)}</span><em>{int(n):,}</em></label>'
+        for v, lbl, n in opts)
+    ns = "".join(
+        f'<option value="{esc(v)}"{" selected" if str(v) in sel else ""}>'
+        f'{esc(lbl)} ({int(n):,})</option>'
+        for v, lbl, n in opts)
+    return f"""<div class="ms" data-ms data-name="{esc(name)}" data-any="{esc(any_label)}">
+<button type="button" class="msbtn" id="{esc(sid)}" aria-haspopup="true" aria-expanded="false" aria-controls="{esc(sid)}-p"><span class="mss">{esc(summ)}</span><i class="msc" aria-hidden="true">▾</i></button>
+<div class="msp" id="{esc(sid)}-p" role="group" aria-label="{esc(label or name)}" hidden>
+  <input type="search" class="msq" placeholder="Search {(esc(label or name)).lower()}…" aria-label="Search {esc(label or name)}" autocomplete="off">
+  <div class="msa"><button type="button" data-msall>Select all</button><button type="button" data-msnone>Clear</button><span class="msn" aria-live="polite"></span></div>
+  <div class="msl">{rows}</div>
+  <div class="msnone" hidden>Nothing matches that search.</div>
+</div>
+<noscript><select name="{esc(name)}" multiple size="6" aria-label="{esc(label or name)}">{ns}</select></noscript>
+</div>"""
 
 
 def approved_codes(cur):
@@ -1775,15 +2087,20 @@ def _scope_where(q):
     if q.get("product"):
         where.append("(product LIKE %s OR title LIKE %s)")
         args += [f'%{q["product"]}%'] * 2
-    if q.get("family"):
-        where.append("product_family=%s"); args.append(q["family"])
+    fams = qlist(q, "family")
+    if fams:
+        cond, a = _in("product_family", fams)
+        where.append(cond); args += a
     if q.get("parent"):
         where.append("parent=%s"); args.append(q["parent"])
-    if q.get("sku"):
+    skus = qlist(q, "sku")
+    if skus:
         if q.get("skulike") == "1":
-            where.append("sku LIKE %s"); args.append(f'%{q["sku"]}%')
+            where.append("(" + " OR ".join(["sku LIKE %s"] * len(skus)) + ")")
+            args += [f"%{s}%" for s in skus]
         else:
-            where.append("sku=%s"); args.append(q["sku"].strip())
+            cond, a = _in("sku", skus)
+            where.append(cond); args += a
     return ("WHERE " + " AND ".join(where)) if where else "", args
 
 
@@ -1902,7 +2219,7 @@ def exposure(cur, q, monthly=False, months=None):
         "zero_months": sum(int(d["zero_months"] or 0) for d in den),
         "months": months,
         "outside": outside,
-        "code_filtered": bool((q.get("complaint") or "").strip()),
+        "code_filtered": bool(qlist(q, "complaint")),
     }
 
 
@@ -2739,9 +3056,13 @@ def p_dashboard(cur, q, msg="", ctx=None):
     # One predicate for the cards, the mix, the chart and the strip: build_where,
     # exactly as /reviews applies it. Range is the static page's rule — the last
     # N months present in the corpus, inclusive — expressed as a from-date.
-    fq = {k: q.get(k) for k in ("q", "family", "month", "source", "label", "review") if q.get(k)}
+    fq = {k: q.get(k) for k in ("q", "family", "month", "from", "to", "source",
+                                "sku", "country", "complaint", "label", "review")
+          if q.get(k)}
     win = (q.get("range") or "").strip()
-    if win in ("3", "6", "12"):
+    # An explicit From/To is the reviewer's own range and wins over a preset:
+    # applying both would intersect them into an empty page for no reason.
+    if win in ("3", "6", "12") and not (q.get("from") or q.get("to")):
         cur.execute("SELECT MAX(month) m FROM v_ai_complaints_monthly")
         mxm = (cur.fetchone() or {}).get("m")
         if mxm:
@@ -2880,6 +3201,14 @@ def p_dashboard(cur, q, msg="", ctx=None):
     # Display labels only; the submitted value stays the stored source so the
     # filter and the per-feed tables keep comparing against 'amazon'.
     sources = [(k, source_label(k), n) for k, n in sources]
+    skus = options(cur, "SELECT sku k, COUNT(*) n FROM v_ai_complaints "
+                        "WHERE sku IS NOT NULL AND sku <> '' GROUP BY sku ORDER BY k")
+    # Marketplace reads as the Amazon name, filters on the stored code. Counts
+    # are corpus counts, like every other picker's, so they do not slide with
+    # the date range and make a choice look empty that is not.
+    countries = options(cur, "SELECT country k, COUNT(*) n FROM v_ai_complaints "
+                             "WHERE country IS NOT NULL GROUP BY country ORDER BY n DESC")
+    countries = [(k, country_label(k), n) for k, n in countries]
     # Global counts for the two options that carry one, exactly as /reviews does
     # it: a corpus fact, not a number that slides with the date range.
     cur.execute("""SELECT COALESCE(SUM(needs_review=1),0) nr,
@@ -2887,14 +3216,6 @@ def p_dashboard(cur, q, msg="", ctx=None):
                      FROM v_ai_complaints""")
     _gc = cur.fetchone()
     review_counts = {"needreview": int(_gc["nr"]), "nolabel": int(_gc["nl"])}
-
-    def _sel(name, vals, cur_val, any_label):
-        opts = [f'<option value="">{any_label}</option>']
-        # vals is (value, count) or (value, label, count): the label is what the
-        # option reads as, the value is what the filter submits.
-        opts += [f'<option value="{esc(v[0])}"{" selected" if cur_val == v[0] else ""}>'
-                 f'{esc(v[1] if len(v) > 2 else v[0])}</option>' for v in vals]
-        return f'<select name="{name}" id="{name}sel">' + "".join(opts) + "</select>"
 
     ranges = [("", "all"), ("3", "last 3 months"), ("6", "last 6 months"),
               ("12", "last 12 months")]
@@ -3070,13 +3391,19 @@ filter is how you reach the rows that are not.</p>
   </div>
 </div>
 <form class="dfilters" method="get" action="/">
-  <div class="df"><label for="famsel">Family</label>{_sel('family', families, q.get('family'), 'All product families')}</div>
-  <div class="df"><label for="datesel">Date</label>
+  <div class="df"><label for="ms-family">Family</label>{ms_control('family', [(k, k, n) for k, n in families], qlist(q, 'family'), 'All product families', 'ms-family', 'Family')}</div>
+  <div class="df"><label for="ms-sku">SKU</label>{ms_control('sku', [(k, k, n) for k, n in skus], qlist(q, 'sku'), 'All SKUs', 'ms-sku', 'SKU')}</div>
+  <div class="df"><label for="ms-country">Marketplace</label>{ms_control('country', countries, qlist(q, 'country'), 'All marketplaces', 'ms-country', 'Marketplace')}</div>
+  <div class="df"><label for="ffrom">From</label>
+    <input id="ffrom" type="date" name="from" value="{esc(q.get('from', ''))}"></div>
+  <div class="df"><label for="fto">To</label>
+    <input id="fto" type="date" name="to" value="{esc(q.get('to', ''))}"></div>
+  <div class="df"><label for="datesel">Month</label>
     <input id="datesel" name="month" value="{esc(q.get('month', ''))}" placeholder="all dates · YYYY-MM"></div>
   <div class="df"><label for="winsel">Range</label>{range_sel}</div>
   <div class="df"><label for="labelsel">Label</label>{_opt_select('label', LABEL_OPTS, q.get('label'))}</div>
   <div class="df"><label for="reviewsel">Review</label>{_opt_select('review', REVIEW_OPTS, q.get('review'), counts=review_counts)}</div>
-  <div class="df"><label for="srcsel">Source</label>{_sel('source', sources, q.get('source'), 'All sources')}</div>
+  <div class="df"><label for="ms-source">Source</label>{ms_control('source', sources, qlist(q, 'source'), 'All sources', 'ms-source', 'Source')}</div>
   <div class="df grow"><label for="qsel">Search</label>
     <input id="qsel" name="q" value="{esc(q.get('q', ''))}" placeholder="search the review text"></div>
   <button class="primary dapply" type="submit">Apply</button>
@@ -3102,7 +3429,7 @@ filter is how you reach the rows that are not.</p>
 </div>"""
     ctx = dict(ctx or {})
     ctx["css"] = DASH_CSS
-    ctx["scripts"] = DASH_MIX_JS
+    ctx["scripts"] = MULTI_JS + DASH_MIX_JS
     return page("Complaint validation", body, "/", msg, ctx=ctx)
 
 
@@ -3218,6 +3545,11 @@ def p_reviews(cur, q, msg="", ctx=None):
     ratings = options(cur, "SELECT rating k, COUNT(*) n FROM v_ai_complaints WHERE rating IS NOT NULL GROUP BY rating ORDER BY rating")
     ratings = [(str(k), f"{int(k)} star", n) for k, n in ratings]
     countries = options(cur, "SELECT country k, COUNT(*) n FROM v_ai_complaints WHERE country IS NOT NULL GROUP BY country ORDER BY n DESC")
+    # Marketplace reads as the Amazon name and filters on the stored code: the
+    # value is what the column holds, so no saved link changes meaning.
+    countries = [(k, country_label(k), n) for k, n in countries]
+    skus = options(cur, "SELECT sku k, COUNT(*) n FROM v_ai_complaints "
+                        "WHERE sku IS NOT NULL AND sku <> '' GROUP BY sku ORDER BY k")
     # Grouped by the taxonomy label, not the stored string: 'Not Needed/unwanted'
     # and 'Not Needed/Unwanted' are one complaint and must be one option with one
     # count, or the filter list shows the same code twice.
@@ -3239,23 +3571,25 @@ def p_reviews(cur, q, msg="", ctx=None):
     # are now the only control for them. ?label= and ?review= still filter
     # (build_where reads both) and still light their chip, so bookmarks and the
     # export links keep working.
-    # The complaint dropdown keeps the stored value (it is a filter, so it must
-    # match the column) and only changes what it reads as.
-    complaint_select = (code_filter_bar("flt-complaint", len(complaints))
-                        + select('complaint', [(k, display_label(k, cur), n) for k, n in complaints],
-                                 q.get("complaint") or "", sid="flt-complaint"))
+    # The complaint picker keeps the stored value (it is a filter, so it must
+    # match the column) and only changes what it reads as. Multi-select: several
+    # complaints are an OR, and a complaint plus a SKU is an AND.
+    complaints_opts = [(k, display_label(k, cur), n) for k, n in complaints]
+    complaint_select = ms_control('complaint', complaints_opts, qlist(q, 'complaint'),
+                                  'All complaints', 'ms-complaint', 'Complaint')
     # F8: echo which SKU values the filter actually matched. "sku=6" used to mean
     # "anything containing 6" (3,655 rows) when the SKU really called 6 has 2,613;
     # a filter that widens silently is indistinguishable from a wrong one.
     sku_echo = ""
-    if q.get("sku"):
+    skus_sel = qlist(q, "sku")
+    if skus_sel:
         cur.execute(f"SELECT v.sku k, COUNT(*) n FROM v_ai_complaints v {w} GROUP BY v.sku ORDER BY n DESC", args)
         hit = cur.fetchall()
         vals = ", ".join(f"{x['k']} ({x['n']:,})" for x in hit[:8])
         more = f" … +{len(hit) - 8} more" if len(hit) > 8 else ""
-        sku_echo = (f' · SKU {"containing" if q.get("skulike") == "1" else "exactly"} '
-                    f'“{esc(q["sku"])}” matched {len(hit)} value'
-                    f'{"s" if len(hit) != 1 else ""}: <span class="mono">{esc(vals)}{more}</span>')
+        sku_echo = (f" · SKU {'containing' if q.get('skulike') == '1' else 'exactly'} "
+                    f"“{esc(', '.join(skus_sel))}” matched {len(hit)} value"
+                    f"{'s' if len(hit) != 1 else ''}: <span class=\"mono\">{esc(vals)}{more}</span>")
     # ---- quick filters ---------------------------------------------------
     # The four doors a reader looks for first, in front of the select form
     # instead of behind it. Each count is computed under the CURRENT filters
@@ -3303,8 +3637,9 @@ def p_reviews(cur, q, msg="", ctx=None):
     # the same row as Search. If any of them is set the disclosure renders OPEN
     # and says how many, because a filtered view that hides its own constraint is
     # how a wrong number gets explained for an hour.
-    more_keys = ("parent", "product", "country", "source", "rating", "tx")
-    more_active = sum(1 for k in more_keys if (q.get(k) or "").strip())
+    more_keys = ("parent", "product", "source", "rating", "tx")
+    more_active = sum(1 for k in more_keys
+                      if (qlist(q, k) if k in MULTI_KEYS else [q.get(k)]))
     more_open = " open" if more_active else ""
     more_label = f"More filters ({more_active} active)" if more_active else "More filters"
     body = f"""<h1>Complaint records</h1>
@@ -3320,16 +3655,10 @@ def p_reviews(cur, q, msg="", ctx=None):
     <div class="fq"><label for="fq">Search everywhere</label>
       <input id="fq" name="q" value="{esc(q.get('q',''))}" placeholder="e.g. leak, cushion"
         title="Looks in the customer's words, the product title, the SKU and the product code"></div>
-    <div><label>Product family</label>{select('family', families, q.get('family'))}</div>
-    <div class="fsku"><label for="fsku">SKU</label>
-      <div class="skuroll">
-        <input id="fsku" name="sku" value="{esc(q.get('sku',''))}" placeholder="e.g. SC-B-IR or an order number">
-        <select name="skulike" aria-label="SKU match">
-          <option value=""{" selected" if q.get("skulike") != "1" else ""}>exact match</option>
-          <option value="1"{" selected" if q.get("skulike") == "1" else ""}>partial match</option>
-        </select>
-      </div></div>
-    <div><label>Complaint</label>{complaint_select}</div>
+    <div><label for="ms-family">Product family</label>{ms_control('family', [(k, k, n) for k, n in families], qlist(q, 'family'), 'All product families', 'ms-family', 'Product family')}</div>
+    <div class="fsku"><label for="ms-sku">SKU</label>{ms_control('sku', [(k, k, n) for k, n in skus], qlist(q, 'sku'), 'All SKUs', 'ms-sku', 'SKU')}</div>
+    <div><label for="ms-complaint">Complaint</label>{complaint_select}</div>
+    <div><label for="ms-country">Marketplace</label>{ms_control('country', countries, qlist(q, 'country'), 'All marketplaces', 'ms-country', 'Marketplace')}</div>
     <div><label for="ffrom">From</label><input id="ffrom" type="date" name="from" value="{esc(q.get('from',''))}"></div>
     <div><label for="fto">To</label><input id="fto" type="date" name="to" value="{esc(q.get('to',''))}"></div>
     <div><button class="primary">Filter</button></div>
@@ -3342,8 +3671,7 @@ def p_reviews(cur, q, msg="", ctx=None):
       <div><label for="fproduct">Product name</label>
         <input id="fproduct" name="product" value="{esc(q.get('product',''))}" placeholder="e.g. SC-B or seat cushion"
           title="Matches the product code or any word in the product title"></div>
-      <div><label>Country</label>{select('country', countries, q.get('country'))}</div>
-      <div><label>Source</label>{select('source', sources, q.get('source'))}</div>
+      <div><label for="ms-source">Source</label>{ms_control('source', sources, qlist(q, 'source'), 'All sources', 'ms-source', 'Source')}</div>
       <div><label>Rating</label>{select('rating', ratings, q.get('rating'))}</div>
       <div><label>Text</label><select name="tx">
         <option value="">Any</option>
@@ -3367,7 +3695,7 @@ def p_reviews(cur, q, msg="", ctx=None):
   </div>
 </aside>"""
     ctx = dict(ctx or {})
-    ctx["scripts"] = CODE_FILTER_JS + DRAWER_JS
+    ctx["scripts"] = CODE_FILTER_JS + DRAWER_JS + MULTI_JS
     return page("Complaint records", body, "/reviews", msg, ctx=ctx)
 
 
@@ -3699,21 +4027,28 @@ def build_where_monthly(q):
         where.append("month=%s"); args.append(q["month"])
     if q.get("product"):
         where.append("(product LIKE %s OR title LIKE %s)"); args += [f'%{q["product"]}%'] * 2
-    if q.get("family"):
-        where.append("product_family=%s"); args.append(q["family"])
+    fams = qlist(q, "family")
+    if fams:
+        cond, a = _in("product_family", fams)
+        where.append(cond); args += a
     if q.get("parent"):
         where.append("parent=%s"); args.append(q["parent"])
-    if q.get("sku"):
+    skus = qlist(q, "sku")
+    if skus:
         # F7: /monthly could not be filtered by SKU at all — build_where_monthly
         # had no sku branch, so /monthly?sku=6 returned the same 4,527 rows as
         # /monthly. Exact by default, with the same explicit 'contains' option as
         # the review-grain page.
         if q.get("skulike") == "1":
-            where.append("sku LIKE %s"); args.append(f'%{q["sku"]}%')
+            where.append("(" + " OR ".join(["sku LIKE %s"] * len(skus)) + ")")
+            args += [f"%{s}%" for s in skus]
         else:
-            where.append("sku=%s"); args.append(q["sku"].strip())
-    if q.get("complaint"):
-        where.append("complaint=%s"); args.append(q["complaint"])
+            cond, a = _in("sku", skus)
+            where.append(cond); args += a
+    comps = qlist(q, "complaint")
+    if comps:
+        cond, a = _in("complaint", comps)
+        where.append(cond); args += a
     mf, mt = month_grain(q.get("from")), month_grain(q.get("to"))
     if mf:
         where.append("month >= %s"); args.append(mf)
@@ -3805,7 +4140,7 @@ def p_monthly(cur, q, msg="", ctx=None):
     parents = options(cur, "SELECT parent k, SUM(n) n FROM v_ai_complaints_monthly WHERE parent IS NOT NULL GROUP BY parent ORDER BY n DESC")
     families = options(cur, "SELECT product_family k, SUM(n) n FROM v_ai_complaints_monthly WHERE product_family IS NOT NULL GROUP BY product_family ORDER BY n DESC")
     complaints = options(cur, "SELECT complaint k, SUM(n) n FROM v_ai_complaints_monthly GROUP BY complaint ORDER BY n DESC")
-    complaint_sql = select('complaint', [(k, display_label(k, cur), v) for k, v in complaints], q.get("complaint") or "")
+    complaint_sql = select('complaint', [(k, display_label(k, cur), v) for k, v in complaints], qone(q, "complaint"))
     mf, mt = month_grain(q.get("from")), month_grain(q.get("to"))
     # The months THIS page describes. With an explicit range it is that range; with
     # none it is the contiguous run that holds the corpus (the same rule the chart
