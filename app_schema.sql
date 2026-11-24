@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS classifications (
   parent         VARCHAR(60)  NULL,     -- business_parent_products.short_name via all_products
   product        VARCHAR(120) NULL,     -- business_products.short_name via all_products
   title          VARCHAR(255) NULL,     -- all_products.title, for searching a product family
+  rating         TINYINT      NULL,     -- cx_reviews.rating (1-5); NULL for feeds with no stars
   review_text    TEXT         NULL,
   classified_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (review_id),

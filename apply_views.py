@@ -216,6 +216,7 @@ VIEWS = [
     ("v_ai_complaints", f"""
 CREATE OR REPLACE VIEW v_ai_complaints AS
 SELECT c.review_id, c.review_date, c.sku, c.asin, c.parent, c.product, c.title,
+       c.rating,
        {family_sql('c.parent')}            AS product_family,
        c.country, c.source, c.order_id, c.review_text,
        c.complaint                          AS ai_complaint,

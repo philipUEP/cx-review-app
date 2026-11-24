@@ -994,6 +994,25 @@ def display_label(c, cur=None):
     return DISPLAY_LABEL.get(norm(c), c)
 
 
+# The STORED source value is a join key and never changes; how it READS does.
+# 'amazon' is the star-rated review feed — every row from it carries
+# cx_reviews.rating, and (checked in the database) the corpus is 1-3 star except
+# one 4-star record. A label of 'amazon' says neither where the stars came from
+# nor that the row is a review, which is exactly what the reviewer could not tell.
+SRC_LABEL = {"amazon": "Amazon 1-3 star review"}
+
+
+def source_label(s):
+    """Display name for a stored source value. fba/ncx are returned unchanged."""
+    return SRC_LABEL.get((s or "").strip().lower(), s)
+
+
+def rating_label(v):
+    """'3 star' — text, not a glyph. No rating is an em dash, never a blank cell:
+    blank reads as 'not loaded', an em dash reads as 'this feed has no stars'."""
+    return f"{int(v)} star" if v is not None else "—"
+
+
 # complaint_codes is the taxonomy: one spelling per code. The classifier emits its
 # own casing ('Not Needed/unwanted', 'Not As Advertised/misleading'), so anything
 # displayed goes through this map rather than being echoed as stored. Cached for a
@@ -1131,6 +1150,11 @@ def build_where(q):
         where.append("LOWER(v.final_complaint)=LOWER(%s)"); args.append(q["complaint"].strip())
     if q.get("source"):
         where.append("v.source=%s"); args.append(q["source"])
+    if q.get("rating"):
+        # The star the review carried. Rows with no rating (fba, ncx) drop out
+        # when a star is chosen, and stay in under 'Any' — which is the truth:
+        # those feeds have no stars, so they cannot match a star.
+        where.append("v.rating=%s"); args.append(q["rating"])
     if q.get("country"):
         where.append("v.country=%s"); args.append(q["country"])
     if q.get("month"):
@@ -2853,6 +2877,9 @@ def p_dashboard(cur, q, msg="", ctx=None):
                             "ORDER BY k")
     sources = options(cur, "SELECT source k, COUNT(*) n FROM v_ai_complaints "
                            "WHERE source IS NOT NULL GROUP BY source ORDER BY k")
+    # Display labels only; the submitted value stays the stored source so the
+    # filter and the per-feed tables keep comparing against 'amazon'.
+    sources = [(k, source_label(k), n) for k, n in sources]
     # Global counts for the two options that carry one, exactly as /reviews does
     # it: a corpus fact, not a number that slides with the date range.
     cur.execute("""SELECT COALESCE(SUM(needs_review=1),0) nr,
@@ -2863,8 +2890,10 @@ def p_dashboard(cur, q, msg="", ctx=None):
 
     def _sel(name, vals, cur_val, any_label):
         opts = [f'<option value="">{any_label}</option>']
-        opts += [f'<option value="{esc(k)}"{" selected" if cur_val == k else ""}>{esc(k)}</option>'
-                 for k, _ in vals]
+        # vals is (value, count) or (value, label, count): the label is what the
+        # option reads as, the value is what the filter submits.
+        opts += [f'<option value="{esc(v[0])}"{" selected" if cur_val == v[0] else ""}>'
+                 f'{esc(v[1] if len(v) > 2 else v[0])}</option>' for v in vals]
         return f'<select name="{name}" id="{name}sel">' + "".join(opts) + "</select>"
 
     ranges = [("", "all"), ("3", "last 3 months"), ("6", "last 6 months"),
@@ -3132,7 +3161,7 @@ def p_reviews(cur, q, msg="", ctx=None):
         pg = 1
     off = (pg - 1) * PAGE_SIZE
     cur.execute(f"""SELECT v.review_id, v.review_date, v.product, v.parent, v.sku, v.asin, v.title,
-                           v.source, v.country, v.ai_complaint, v.final_complaint,
+                           v.source, v.rating, v.country, v.ai_complaint, v.final_complaint,
                            v.human_decision, v.human_validated, v.needs_review, v.is_new_code,
                            v.human_complaint, v.has_prose,
                            LEFT(COALESCE(v.review_text,''),400) txt
@@ -3174,6 +3203,7 @@ def p_reviews(cur, q, msg="", ctx=None):
           <td class="mono">{amz_asin(r["asin"], r["title"])}</td>
           <td class="mono">{esc(r["parent"] or "—")}</td>
           <td>{amz_sku(r["sku"])}</td>
+          <td class="mono">{rating_label(r["rating"])}</td>
           <td>{label}<br>{pill} {prov_badge(r["human_decision"], bool((r["final_complaint"] or "").strip()))}</td>
           <td class="rv" title="Click to read the full comment">{text_clip(r["txt"])}</td>
           <td class="open-cell"><a class="rowopen" href="/review/{rid}">open<span class="chev">›</span></a></td></tr>""")
@@ -3182,6 +3212,11 @@ def p_reviews(cur, q, msg="", ctx=None):
     parents = options(cur, "SELECT parent k, COUNT(*) n FROM v_ai_complaints WHERE parent IS NOT NULL GROUP BY parent ORDER BY n DESC")
     families = options(cur, "SELECT product_family k, COUNT(*) n FROM v_ai_complaints WHERE product_family IS NOT NULL GROUP BY product_family ORDER BY n DESC")
     sources = options(cur, "SELECT source k, COUNT(*) n FROM v_ai_complaints WHERE source IS NOT NULL GROUP BY source ORDER BY n DESC")
+    # Labels are display-only; the value stays the stored source, so the filter
+    # still compares against 'amazon'.
+    sources = [(k, source_label(k), n) for k, n in sources]
+    ratings = options(cur, "SELECT rating k, COUNT(*) n FROM v_ai_complaints WHERE rating IS NOT NULL GROUP BY rating ORDER BY rating")
+    ratings = [(str(k), f"{int(k)} star", n) for k, n in ratings]
     countries = options(cur, "SELECT country k, COUNT(*) n FROM v_ai_complaints WHERE country IS NOT NULL GROUP BY country ORDER BY n DESC")
     # Grouped by the taxonomy label, not the stored string: 'Not Needed/unwanted'
     # and 'Not Needed/Unwanted' are one complaint and must be one option with one
@@ -3268,13 +3303,13 @@ def p_reviews(cur, q, msg="", ctx=None):
     # the same row as Search. If any of them is set the disclosure renders OPEN
     # and says how many, because a filtered view that hides its own constraint is
     # how a wrong number gets explained for an hour.
-    more_keys = ("parent", "product", "country", "source", "tx")
+    more_keys = ("parent", "product", "country", "source", "rating", "tx")
     more_active = sum(1 for k in more_keys if (q.get(k) or "").strip())
     more_open = " open" if more_active else ""
     more_label = f"More filters ({more_active} active)" if more_active else "More filters"
     body = f"""<h1>Complaint records</h1>
 <p class="sub">{n:,} complaint records match — <b>{n_pr:,}</b> with a customer comment
-  · <b>{n_co:,}</b> return-reason only · <b>{n_rv:,}</b> review text (the amazon feed){sku_echo}<br>
+  · <b>{n_co:,}</b> return-reason only · <b>{n_rv:,}</b> review text (the Amazon 1-3 star review feed){sku_echo}<br>
   page {pg} of {max(1, (n + PAGE_SIZE - 1)//PAGE_SIZE)} · showing {len(rows)}
   · <a href="/export.csv?{esc(qstr(q))}">export CSV</a>
   · <a href="/export.csv?{esc(qstr(q, text='1'))}">export with text</a>
@@ -3309,6 +3344,7 @@ def p_reviews(cur, q, msg="", ctx=None):
           title="Matches the product code or any word in the product title"></div>
       <div><label>Country</label>{select('country', countries, q.get('country'))}</div>
       <div><label>Source</label>{select('source', sources, q.get('source'))}</div>
+      <div><label>Rating</label>{select('rating', ratings, q.get('rating'))}</div>
       <div><label>Text</label><select name="tx">
         <option value="">Any</option>
         <option value="prose"{" selected" if q.get("tx")=="prose" else ""}>Has a customer comment</option>
@@ -3317,9 +3353,9 @@ def p_reviews(cur, q, msg="", ctx=None):
     </div>
   </details>
 </form>
-<div class="card"><table><thead><tr><th>Date</th><th>ASIN</th><th>Parent</th><th>SKU</th>
+<div class="card"><table><thead><tr><th>Date</th><th>ASIN</th><th>Parent</th><th>SKU</th><th>Rating</th>
 <th>Complaint</th><th>Comment</th><th></th></tr></thead>
-<tbody>{''.join(trs) or '<tr><td colspan="7" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
+<tbody>{''.join(trs) or '<tr><td colspan="8" class="empty">Nothing matches those filters.</td></tr>'}</tbody></table></div>
 <div class="pager">{f'<a href="/reviews?{esc(qstr(q, page=pg-1))}">← previous</a>' if pg > 1 else ''}
   <span class="sp">page {pg}</span>
   {f'<a href="/reviews?{esc(qstr(q, page=pg+1))}">next →</a>' if off + PAGE_SIZE < n else ''}</div>
@@ -3457,7 +3493,7 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
                          ("No label on this record — the classifier produced nothing, so it needs a person."))
 
     inner = f"""<div class="drw-head">
-  <div class="drw-kicker">Review {esc(rid)} · {esc(r["review_date"])} · {esc(r["source"] or "")} {esc(r["country"] or "")}</div>
+  <div class="drw-kicker">Review {esc(rid)} · {esc(r["review_date"])} · {esc(source_label(r["source"]) or "")} {esc(r["country"] or "")}</div>
   <{title_tag} class="drw-title">{esc(r["product"] or "Unknown product")}{" — " + esc(short_title(r["title"])) if r["title"] else ""}</{title_tag}>
   <div class="drw-sub">parent {esc(r["parent"] or "—")}{(" · order " + esc(r["order_id"])) if r["order_id"] else ""}</div>
 </div>
@@ -3515,7 +3551,8 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
   <dl class="kv">
     <dt>Review</dt><dd class="mono">{esc(rid)}</dd>
     <dt>Date</dt><dd>{esc(r["review_date"])}</dd>
-    <dt>Source</dt><dd>{esc(r["source"] or "—")} {esc(r["country"] or "")}</dd>
+    <dt>Source</dt><dd>{esc(source_label(r["source"]) or "—")} {esc(r["country"] or "")}</dd>
+    <dt>Rating</dt><dd>{rating_label(r["rating"])}</dd>
     <dt>Order</dt><dd class="mono">{esc(r["order_id"] or "—")}</dd>
     <dt>Product</dt><dd>{esc(r["product"] or "—")}</dd>
     <dt>Parent</dt><dd class="mono">{esc(r["parent"] or "—")}</dd>
@@ -4726,7 +4763,7 @@ weekly sample; these are graded here.</p>"""
 # ---------------------------------------------------------------- export
 
 EXPORT_COLS = ["review_id", "review_date", "month", "product_family", "product", "parent", "sku",
-               "asin", "title", "order_id", "source", "country", "ai_complaint", "ai_category",
+               "asin", "title", "order_id", "source", "rating", "country", "ai_complaint", "ai_category",
                "final_complaint", "complaint_display", "final_category", "human_decision",
                "human_complaint", "needs_review", "is_new_code", "has_prose", "dup_rank", "dup_group"]
 
@@ -4736,7 +4773,7 @@ def export_csv(cur, q):
     cols = EXPORT_COLS + (["review_text"] if q.get("text") == "1" else [])
     cur.execute(f"""SELECT v.review_id, v.review_date, DATE_FORMAT(v.review_date,'%%Y-%%m') month,
                            v.product_family, v.product, v.parent, v.sku, v.asin, v.title, v.order_id,
-                           v.source, v.country,
+                           v.source, v.rating, v.country,
                            v.ai_complaint, v.ai_category, v.final_complaint, v.final_category,
                            v.human_decision, v.human_complaint, v.needs_review, v.is_new_code,
                            v.has_prose, v.dup_rank, v.dup_group, v.review_text

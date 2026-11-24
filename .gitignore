@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 venv/
 site/
+.cf-deploy/
+.wrangler/
 *.log
 data/v3_output*.csv
 data/review_flags*.csv

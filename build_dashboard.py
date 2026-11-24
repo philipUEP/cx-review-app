@@ -234,7 +234,7 @@ def main():
     cur = conn.cursor()
 
     cur.execute("""SELECT review_id, review_date, sku, parent, product, asin, title, order_id,
-                          country, source, ai_complaint, ai_category,
+                          country, source, rating, ai_complaint, ai_category,
                           final_complaint, final_category, second_complaint,
                           needs_review, is_new_code, has_prose, product_family,
                           human_validated,
@@ -374,6 +374,10 @@ def main():
         # Everything the client needs to answer "what is the mix, is it moving,
         # and how exposed are we" without a second request.
         "families": families,
+        # Stored source -> display name. The value never changes (it is the filter
+        # key and the join key); 'amazon' is the star-rated review feed and reads
+        # as such everywhere the page shows it.
+        "src_label": {"amazon": "Amazon 1-3 star review"},
         "mix": {"today": date.today().isoformat(), "feed_dates": feed_dates,
                 "source_max": source_max, "sales": sales, "sku_meta": sku_meta},
         "rows": [{
@@ -386,6 +390,9 @@ def main():
             # travel with the payload to stay one hover away (and in the detail).
             "ti": r["title"] or "",
             "src": r["source"] or "",
+            # Star rating (1-5) or None. Kept as a number so the filter can compare
+            # values; the page renders it as '3 star'. NULL is a fact for fba/ncx.
+            "rt": int(r["rating"]) if r["rating"] is not None else None,
             "c": r["ai_complaint"] or "", "cat": r["ai_category"] or "",
             "fc": r["final_complaint"] or "", "fcat": r["final_category"] or "",
             "c2": r["second_complaint"] or "",
@@ -671,6 +678,8 @@ td.txt .prose{display:block;margin-top:2px}
         <select id="reviewsel" data-f="rv" aria-label="Review state"><option value="">Any</option><option value="needreview">Needs review</option><option value="nolabel">No label</option><option value="newcode">New code</option><option value="decided">Decided</option></select></div>
       <div class="f"><label for="srcsel">Source</label>
         <select id="srcsel" data-f="src"><option value="">All sources</option></select></div>
+      <div class="f"><label for="rtsel">Rating</label>
+        <select id="rtsel" data-f="rt" aria-label="Star rating"><option value="">Any</option></select></div>
       <div class="f grow"><label for="qsel">Search</label>
         <input id="qsel" data-f="q" placeholder="search the review text"></div>
     </div>
@@ -698,12 +707,13 @@ td.txt .prose{display:block;margin-top:2px}
     <div class="tblwrap">
       <table>
         <thead>
-          <tr><th>Status</th><th>Date</th><th>ASIN</th><th>SKU</th><th>Complaint</th><th>Review</th></tr>
+          <tr><th>Status</th><th>Date</th><th>ASIN</th><th>SKU</th><th>Rating</th><th>Complaint</th><th>Review</th></tr>
           <tr class="filterrow">
             <th></th>
             <th></th>
             <th><input data-f="a" placeholder="filter"></th>
             <th><input data-f="s" placeholder="filter"></th>
+            <th></th>
             <th><select data-f="fc"><option value="">All</option></select></th>
             <th></th>
           </tr>
@@ -859,6 +869,11 @@ if(quickBox()){
 
 function esc(s){return (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
 function nfmt(n){return (n||0).toLocaleString()}
+/* Stored source -> display name. 'amazon' is the star-rated review feed; the
+   VALUE stays 'amazon' (it is the filter key), only the words change. Loaded
+   from the payload so the label lives with the data, with a default so an older
+   cached payload still reads correctly. */
+let SRCLABEL={amazon:"Amazon 1-3 star review"};
 
 /* Review text is an Amazon return form: up to six pipe-separated segments, the
    first one or two being picklist values ('Changed Mind', 'My needs changed').
@@ -1459,6 +1474,11 @@ function txtCell(r){
     :`<span class="prose" style="color:#6b7280">No customer comment — only the return reason was recorded</span>`;
   return `<div class="rvclip">${head}${body}</div>`;
 }
+function ratingCell(r){
+  /* Text, not a star glyph: a font that lacks it would render a box. A row with
+     no rating is an em dash, never a blank cell — blank reads as 'not loaded'. */
+  return r.rt==null ? "—" : r.rt+" star";
+}
 function render(){
   const slice=VIEW.slice(page*PER,(page+1)*PER);
   document.getElementById("table").dataset.match=VIEW.length;
@@ -1467,9 +1487,10 @@ function render(){
     <td class="mono">${esc(r.d)}</td>
     <td class="mono">${asinCell(r)}</td>
     <td class="mono">${skuCell(r)}</td>
+    <td class="mono">${ratingCell(r)}</td>
     <td>${esc(nice(r.fc))||"—"}${r.hc&&r.hc!==r.c?'<span title="corrected from '+esc(r.c)+'">*</span>':''}</td>
     <td class="txt" title="Click to read the full comment" onclick="event.stopPropagation();this.classList.toggle('exp')">${txtCell(r)}</td></tr>`).join("")
-    || '<tr><td colspan="6" style="padding:34px;text-align:center;color:#6b7280">Nothing matches those filters.</td></tr>';
+    || '<tr><td colspan="7" style="padding:34px;text-align:center;color:#6b7280">Nothing matches those filters.</td></tr>';
   document.getElementById("pinfo").textContent=`${VIEW.length.toLocaleString()} rows · page ${page+1} of ${Math.max(1,Math.ceil(VIEW.length/PER))}`;
   document.getElementById("prev").disabled=page===0;
   document.getElementById("next").disabled=(page+1)*PER>=VIEW.length;
@@ -1502,7 +1523,7 @@ function openRow(id){
     +(r.hp?"":' <span class="tag blank">no comment</span>');
   document.getElementById("dkv").innerHTML=[
     ["ASIN",r.a],["Review ID",r.id],["Date",r.d],["SKU",r.s],["Product",r.pr],["Title",r.ti],["Family",r.fam],["Parent",r.p],
-    ["Country",r.ct],["Source",r.src],["Order ID",r.o],["AI code",nice(r.c)],["AI category",r.cat],
+    ["Country",r.ct],["Source",SRCLABEL[r.src]||r.src],["Rating",ratingCell(r)],["Order ID",r.o],["AI code",nice(r.c)],["AI category",r.cat],
     ["Validated",nice(r.fc)],["Validated category",r.fcat],["Second choice",nice(r.c2)]
   ].map(([k,v])=>`<div class="k">${k}</div><div class="v">${esc(v)||"—"}</div>`).join("");
   const p=parts(r.t);
@@ -1571,6 +1592,8 @@ function keepRow(r,raw,low,cut,skipDate){
   if(low("cat") && !(r.cat||"").toLowerCase().includes(low("cat"))) return false;
   if(raw.ct && (r.ct||"")!==raw.ct) return false;
   if(raw.src && (r.src||"")!==raw.src) return false;
+  /* A specific star excludes rows with no rating; 'Any' keeps them. */
+  if(raw.rt && String(r.rt==null?"":r.rt)!==raw.rt) return false;
   if(raw.fc && (r.fc||"")!==raw.fc) return false;
   if(low("q") && !(r.t||"").toLowerCase().includes(low("q"))) return false;
   if(raw.fam && (r.fam||"")!==raw.fam) return false;
@@ -1595,10 +1618,15 @@ document.getElementById("next").onclick=()=>{if((page+1)*PER<VIEW.length){page++
 
 fetch("data/reviews.json").then(r=>r.json()).then(d=>{
   ROWS=d.rows; VIEW=ROWS;
-  const ct=new Set(), src=new Set();
-  ROWS.forEach(r=>{if(r.ct)ct.add(r.ct); if(r.src)src.add(r.src)});
+  SRCLABEL=Object.assign({},SRCLABEL,d.src_label||{});
+  const ct=new Set(), src=new Set(), rt=new Set();
+  ROWS.forEach(r=>{if(r.ct)ct.add(r.ct); if(r.src)src.add(r.src); if(r.rt!=null)rt.add(r.rt)});
   const srcSel=document.querySelector('[data-f="src"]'), fcSel=document.querySelector('[data-f="fc"]');
-  if(srcSel) [...src].sort().forEach(v=>srcSel.insertAdjacentHTML("beforeend",`<option value="${esc(v)}">${esc(v)}</option>`));
+  const rtSel=document.querySelector('[data-f="rt"]');
+  if(srcSel) [...src].sort().forEach(v=>srcSel.insertAdjacentHTML("beforeend",`<option value="${esc(v)}">${esc(SRCLABEL[v]||v)}</option>`));
+  /* One option per star value actually present, so a 4-star record can never be
+     unfilterable just because the menu was hardcoded to 1-3. */
+  if(rtSel) [...rt].sort((a,b)=>a-b).forEach(v=>rtSel.insertAdjacentHTML("beforeend",`<option value="${v}">${v} star</option>`));
   if(fcSel) Object.values(CATS).flat().forEach(o=>fcSel.insertAdjacentHTML("beforeend",`<option value="${esc(o.c)}">${esc(o.c)}</option>`));
   /* The counts come from the payload, not the markup: a hard-coded number in the
      template would silently rot the next time the classifier runs. */
@@ -1616,7 +1644,7 @@ fetch("data/reviews.json").then(r=>r.json()).then(d=>{
 function exportRows(withText){
   // Export what is on screen, at the grain a pivot needs: one month column, the
   // source and the resolved category are all present, so no second join is needed.
-  const head=["review_id","review_date","month","product_family","sku","parent","asin","product","source","country",
+  const head=["review_id","review_date","month","product_family","sku","parent","asin","product","source","rating","country",
               "ai_complaint","ai_category","final_complaint","complaint_display","final_category","human_decision","has_prose"];
   if(withText) head.push("review_text");
   const q=v=>'"'+String(v==null?"":v).replace(/"/g,'""')+'"';
@@ -1624,7 +1652,7 @@ function exportRows(withText){
     // final_complaint stays the STORED code; complaint_display carries the
     // readable label. Same two columns as the app's export, so the mirror's file
     // joins to it instead of using a vocabulary of its own.
-    const a=[r.id,r.d,r.mon,r.fam,r.s,r.p,r.a,r.pr,r.src,r.ct,r.c,r.cat,r.fc,nice(r.fc),r.fcat,r.dec,r.hp];
+    const a=[r.id,r.d,r.mon,r.fam,r.s,r.p,r.a,r.pr,r.src,r.rt==null?"":r.rt,r.ct,r.c,r.cat,r.fc,nice(r.fc),r.fcat,r.dec,r.hp];
     if(withText) a.push(r.t);
     return a.map(q).join(",");
   })).join("\n");

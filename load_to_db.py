@@ -172,6 +172,13 @@ def main():
                  "backlog load from v3_output.csv; catch-alls withheld from menu"))
     conn.commit()
 
+    # `rating` is deliberately ABSENT from this statement. It does not live in the
+    # CSV — it comes from cx_reviews.rating via enrich_products.py, which runs
+    # immediately after this load — so writing it here would either set every row
+    # NULL on each run or invent a value the CSV never carried. Leaving the column
+    # out of both the INSERT list and the ON DUPLICATE KEY UPDATE keeps a backfilled
+    # rating intact across reloads; a genuinely new review_id inserts NULL and is
+    # filled by the enrichment pass that follows.
     sql = """INSERT INTO classifications
              (review_id, run_id, prompt_version, prompt_hash, complaint, category,
               second_complaint, needs_review,
@@ -242,6 +249,8 @@ def main():
     cur.execute("SELECT COUNT(*) FROM classifications WHERE complaint IS NULL"); print("  blank complaint :", cur.fetchone()[0])
     cur.execute("SELECT COUNT(*) FROM classifications WHERE review_date IS NULL"); print("  blank date      :", cur.fetchone()[0])
     cur.execute("SELECT MIN(review_date), MAX(review_date) FROM classifications"); print("  date range      :", cur.fetchone())
+    cur.execute("SELECT COUNT(*) FROM classifications WHERE rating IS NOT NULL")
+    print("  rated rows      :", cur.fetchone()[0], "(carried in, not written by this loader)")
     cur.execute("SELECT complaint, COUNT(*) FROM classifications GROUP BY complaint ORDER BY 2 DESC LIMIT 5")
     print("  top labels      :", cur.fetchall())
     if n_bad:

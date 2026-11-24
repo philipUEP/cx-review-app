@@ -13,7 +13,12 @@ ENVF=/opt/data/.env
 A=7e26155cd322d5d5c48f3de19bac611f
 PROJECT=uep-ai-complaints
 DOMAIN="$PROJECT.pages.dev"
-ROOT=/opt/data/ai-complaint-validation
+# Deploy the checkout this script lives in. It used to hardcode
+# /opt/data/ai-complaint-validation, so running it from the real repo uploaded a
+# DIFFERENT directory's site/ — a stale build with none of the current changes.
+# Script-relative resolves to the same path when the script sits in the deploy
+# workspace, and to the repo when it is run from the repo.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SITE="$ROOT/site"
 STAGE="$ROOT/.cf-deploy"
 WRANGLER=/opt/data/cloudflare-tools/node_modules/.bin/wrangler

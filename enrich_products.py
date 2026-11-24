@@ -28,6 +28,11 @@ Columns written (classifications):
     parent   = business_parent_products.short_name  (e.g. RM)
     title    = COALESCE(all_products.title, products_details.title,
                         business_products.name), truncated
+    rating   = cx_reviews.rating (1-5). Carried with the row so a complaint can be
+               linked to the star rating it came from. It lives on cx_reviews, not
+               on any product table, and it is NULL for feeds that carry no stars
+               (fba, ncx), so the column is nullable and NULL is a fact, not a
+               missing enrichment.
 
 Precedence for product/parent: the canonical FK through `products` wins; an
 exact `all_products.sku = business_products.short_name` match is the fallback
@@ -56,6 +61,7 @@ TITLE_MAX = 240
 
 LOOKUP = """
 SELECT r.id AS review_id,
+       r.rating,
        ap.sku,
        ap.asin,
        COALESCE(bp.short_name, bd.short_name)   AS product,
@@ -111,13 +117,33 @@ def ensure_title_column(cur):
     return True
 
 
+def ensure_rating_column(cur):
+    """The star rating travels with the review (cx_reviews.rating).
+
+    Nullable on purpose: fba and ncx carry no stars, and NULL is the honest
+    value for them - 0 or a made-up average would be a rating that never existed.
+    """
+    cur.execute("""SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='classifications'
+                      AND COLUMN_NAME='rating'""", (os.environ["CXAPP_DB_NAME"],))
+    if cur.fetchone()["n"]:
+        return False
+    cur.execute("ALTER TABLE classifications ADD COLUMN rating TINYINT NULL AFTER title")
+    print("  added classifications.rating TINYINT NULL")
+    return True
+
+
 def main():
     w = write_db()
     wc = w.cursor()
-    if ensure_title_column(wc):
+    added = False
+    added |= ensure_title_column(wc)
+    added |= ensure_rating_column(wc)
+    if added:
         w.commit()
 
-    wc.execute("""SELECT review_id, sku, asin, parent, product, title FROM classifications""")
+    wc.execute("""SELECT review_id, sku, asin, parent, product, title, rating
+                    FROM classifications""")
     have = {r["review_id"]: r for r in wc.fetchall()}
     ids = list(have)
     print(f"classifications: {len(ids):,} rows")
@@ -179,32 +205,39 @@ def main():
             "product": clean(t["product"], 120),
             "parent": clean(t["parent"], 60),
             "title": clean(t["title"], TITLE_MAX),
+            "rating": int(t["rating"]) if t["rating"] is not None else None,
         }
-        diff = {k: v for k, v in new.items() if (clean(old[k]) or None) != v}
+        # clean() stringifies, so an int rating would compare '3' != 3 on every
+        # run and rewrite all 1,133 rows forever. Compare it as a number.
+        diff = {k: v for k, v in new.items()
+                if ((old[k] if old[k] is not None else None) != v if k == "rating"
+                    else (clean(old[k]) or None) != v)}
         if diff:
             for k in diff:
                 changed[k] += 1
             upd.append((new["sku"], new["asin"], new["product"], new["parent"],
-                        new["title"], rid))
+                        new["title"], new["rating"], rid))
 
     print(f"rows needing an update: {len(upd):,} "
           f"(sku {changed['sku']:,}, asin {changed['asin']:,}, product {changed['product']:,}, "
-          f"parent {changed['parent']:,}, title {changed['title']:,})")
+          f"parent {changed['parent']:,}, title {changed['title']:,}, "
+          f"rating {changed['rating']:,})")
 
     # One UPDATE ... JOIN through a temp table, not 19k single-row UPDATEs: each
     # statement is a network round trip, which turned this into a 10-minute run
     # that looked like a hang. 19k rows in 10 multi-row INSERTs is seconds.
     wc.execute("""CREATE TEMPORARY TABLE _enrich (
                     review_id BIGINT PRIMARY KEY, sku VARCHAR(60), asin VARCHAR(20),
-                    product VARCHAR(120), parent VARCHAR(60), title VARCHAR(255)
+                    product VARCHAR(120), parent VARCHAR(60), title VARCHAR(255),
+                    rating TINYINT NULL
                   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
     for i in range(0, len(upd), 2000):
-        wc.executemany("""INSERT INTO _enrich (sku, asin, product, parent, title, review_id)
-                          VALUES (%s,%s,%s,%s,%s,%s)""", upd[i:i + 2000])
+        wc.executemany("""INSERT INTO _enrich (sku, asin, product, parent, title, rating, review_id)
+                          VALUES (%s,%s,%s,%s,%s,%s,%s)""", upd[i:i + 2000])
     wc.execute("""UPDATE classifications c
                     JOIN _enrich e ON e.review_id = c.review_id
                      SET c.sku=e.sku, c.asin=e.asin, c.product=e.product,
-                         c.parent=e.parent, c.title=e.title""")
+                         c.parent=e.parent, c.title=e.title, c.rating=e.rating""")
     print(f"  updated: {wc.rowcount:,} rows")
     wc.execute("DROP TEMPORARY TABLE _enrich")
     w.commit()
@@ -216,6 +249,15 @@ def main():
     for col in ("sku", "asin", "product", "parent", "title"):
         wc.execute(f"SELECT COUNT(*) n FROM classifications WHERE {col} IS NOT NULL AND {col}<>''")
         print(f"  {col:<18}: {wc.fetchone()['n']:,} filled")
+    wc.execute("""SELECT COALESCE(CAST(rating AS CHAR),'(none)') r, COUNT(*) n
+                    FROM classifications GROUP BY rating ORDER BY rating""")
+    print("  rating            : " + " · ".join(f"{x['r']} star {x['n']:,}" if x["r"] != "(none)"
+                                                else f"no rating {x['n']:,}"
+                                                for x in wc.fetchall()))
+    wc.execute("""SELECT source, COUNT(*) n FROM classifications
+                   WHERE rating IS NOT NULL GROUP BY source""")
+    print("  rated by source   : " + " · ".join(f"{x['source']} {x['n']:,}"
+                                                 for x in wc.fetchall()))
     wc.execute("""SELECT COUNT(*) n FROM classifications
                    WHERE sku IS NOT NULL AND sku REGEXP '^[0-9]+$'""")
     n_num = wc.fetchone()["n"]
