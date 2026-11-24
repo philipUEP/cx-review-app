@@ -367,8 +367,24 @@ tr:hover td.evcell{background:#fff}
 .cdec-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;min-width:0}
 .cdec-row select,.cdec-row input{min-width:0;max-width:100%}
 .cdec-row input[type=text]{flex:1 1 190px;min-width:150px}
+/* Type-to-find above a complaint picker: small, quiet, and always attached to
+   the select it narrows. The count is what proves the list is filtered. */
+.cfbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 6px;min-width:0}
+.cfbar input[type=text]{flex:1 1 130px;min-width:0;max-width:230px;padding:5px 8px;font-size:12.5px}
+.cfcount{font-size:11.5px;color:var(--mut);white-space:nowrap;font-variant-numeric:tabular-nums}
+.qcallwrap .cfbar{flex:1 1 100%}
+.qchg .cfbar{margin-top:6px}
+.addcode .cfbar{max-width:none}
 button.own{border-color:#c7d2fe;color:#1d4ed8;background:#f5f8ff}
 button.own:hover{background:#eef2ff}
+/* Add-a-code: the same shape as a decision row, at the top of the page. */
+.addform{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:0 0 8px}
+.addform>div{flex:1 1 220px;min-width:0}
+.addform .addbtn{flex:0 1 auto}
+.addform input,.addform select{width:100%;min-width:0;max-width:100%}
+.whoh{font-size:15px;margin:20px 0 6px}
+.wholist{margin:0 0 6px;padding-left:18px;font-size:13.5px;line-height:1.7}
+.wholist li{margin:0}
 
 /* ---------------------------------------------------------------- drawer
    One panel, 620px, its own scroll, over a dimmed backdrop. It replaces the
@@ -611,6 +627,37 @@ DRAWER_JS = """<script>
   window.addEventListener('hashchange', fromHash);
   fromHash();
 })();
+</script>"""
+
+
+# Type-to-find for a complaint picker. Inline handlers rather than addEventListener:
+# the drawer injects the picker with innerHTML, where a <script> in the fetched
+# fragment would never run, but an oninput attribute still fires. The option
+# element itself is only hidden/disabled — the <select> is still the control that
+# submits, and with scripting off nothing here runs, so the whole alphabetical
+# list is what the reviewer sees.
+CODE_FILTER_JS = """<script>
+function cxCodeFilter(inp) {
+  var sel = document.getElementById(inp.getAttribute('data-target'));
+  if (!sel) return;
+  var q = (inp.value || '').trim().toLowerCase(), shown = 0, total = 0;
+  for (var i = 0; i < sel.options.length; i++) {
+    var o = sel.options[i];
+    // The placeholder ("choose a code…", "Any", "— not called —") and the
+    // "not a complaint" option are not codes: always visible, never counted.
+    if (!o.value || o.getAttribute('data-fixed') === '1') continue;
+    total++;
+    var hit = !q || o.value.toLowerCase().indexOf(q) !== -1;
+    // A selected option is never hidden by the filter: the reviewer must be able
+    // to see the call that is about to be saved, even while narrowing the list.
+    var keep = hit || o.selected;
+    o.hidden = !keep;
+    o.disabled = !keep;
+    if (keep) shown++;
+  }
+  var c = document.getElementById(inp.getAttribute('data-for'));
+  if (c) c.textContent = 'showing ' + shown + ' of ' + total;
+}
 </script>"""
 
 
@@ -1160,7 +1207,7 @@ def options(cur, sql, args=()):
     return [(r["k"], r["n"]) for r in cur.fetchall()]
 
 
-def select(name, vals, cur_val, any_label="Any"):
+def select(name, vals, cur_val, any_label="Any", sid=None):
     """Dropdown. vals is (value, count) or (value, label, count) — the label is
     display-only, the value is what the filter compares against, so a renamed
     label ('Unspecified') can never be submitted as an unknown value."""
@@ -1169,12 +1216,38 @@ def select(name, vals, cur_val, any_label="Any"):
         v, lbl, n = item if len(item) == 3 else (item[0], item[0], item[1])
         opts += (f'<option value="{esc(v)}" {"selected" if str(cur_val) == str(v) else ""}>'
                  f'{esc(lbl)} ({n:,})</option>')
-    return f'<select name="{name}"><option value="">{any_label}</option>{opts}</select>'
+    sid = f' id="{esc(sid)}"' if sid else ""
+    return f'<select name="{name}"{sid}><option value="">{any_label}</option>{opts}</select>'
 
 
 def approved_codes(cur):
     cur.execute("SELECT code, category FROM complaint_codes WHERE approved=1 ORDER BY category, code")
     return cur.fetchall()
+
+
+def alpha_codes(codes):
+    """Codes in alphabetical order, case-insensitively.
+
+    complaint_codes is read category-first for the rollups, but a picker is a
+    lookup: a reviewer knows the code, not which category it lives under. With
+    137 options, category order hides the one she wants.
+    """
+    return sorted((c for c in codes if c), key=lambda c: (c.lower(), c))
+
+
+def code_filter_bar(sel_id, n):
+    """The type-to-find input that sits directly above a complaint picker.
+
+    Progressive enhancement only: the <select> below is still the control that
+    submits, so with scripting off the full alphabetical list is what is shown.
+    """
+    return (f'<div class="cfbar"><input type="text" class="cfilter" '
+            f'data-for="{esc(sel_id)}-n" data-target="{esc(sel_id)}" '
+            f'oninput="cxCodeFilter(this)" autocomplete="off" spellcheck="false" '
+            f'placeholder="type to find a code…" aria-label="Filter complaint codes" '
+            f'aria-controls="{esc(sel_id)}">'
+            f'<span class="cfcount" id="{esc(sel_id)}-n" aria-live="polite">'
+            f'showing {n} of {n}</span></div>')
 
 
 # ------------------------------------------------------- approved -> vocabulary
@@ -3119,7 +3192,11 @@ def p_reviews(cur, q, msg="", ctx=None):
     for k, cnt in raw:
         lbl = display_label(k, cur)
         merged[lbl] = merged.get(lbl, 0) + cnt
-    complaints = sorted(merged.items(), key=lambda kv: -kv[1])
+    # A filter list is read in one of two ways: you know the code, or you scan.
+    # Alphabetical by code serves both, and the counts stay: they describe the
+    # corpus, so the list is still ordered by the taxonomy's spelling, not by a
+    # number that moves every time a filter changes.
+    complaints = sorted(merged.items(), key=lambda kv: (kv[0].lower(), kv[0]))
 
     # Label and Review used to be two more selects here, printed directly below
     # the chips that already set exactly those two dimensions: the same two
@@ -3129,8 +3206,9 @@ def p_reviews(cur, q, msg="", ctx=None):
     # export links keep working.
     # The complaint dropdown keeps the stored value (it is a filter, so it must
     # match the column) and only changes what it reads as.
-    complaint_select = select('complaint', [(k, display_label(k, cur), n) for k, n in complaints],
-                              q.get("complaint") or "")
+    complaint_select = (code_filter_bar("flt-complaint", len(complaints))
+                        + select('complaint', [(k, display_label(k, cur), n) for k, n in complaints],
+                                 q.get("complaint") or "", sid="flt-complaint"))
     # F8: echo which SKU values the filter actually matched. "sku=6" used to mean
     # "anything containing 6" (3,655 rows) when the SKU really called 6 has 2,613;
     # a filter that widens silently is indistinguishable from a wrong one.
@@ -3253,7 +3331,7 @@ def p_reviews(cur, q, msg="", ctx=None):
   </div>
 </aside>"""
     ctx = dict(ctx or {})
-    ctx["scripts"] = DRAWER_JS
+    ctx["scripts"] = CODE_FILTER_JS + DRAWER_JS
     return page("Complaint records", body, "/reviews", msg, ctx=ctx)
 
 
@@ -3305,17 +3383,11 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
     rep = canonical(cur, r["final_complaint"])
     second = canonical(cur, r["second_complaint"])
 
-    by_cat = defaultdict(list)
-    for c in approved_codes(cur):
-        by_cat[c["category"] or "Uncategorised"].append(c["code"])
-    groups = "".join(
-        f'<optgroup label="{esc(cat)}">' + "".join(
-            # No preselection: "Correct" must be an explicit choice, or a stray
-            # click on Save would record a decision nobody made. The Label section
-            # above already states what the record reports as today.
-            f'<option value="{esc(c)}">{esc(c)}</option>'
-            for c in codes) + "</optgroup>"
-        for cat, codes in sorted(by_cat.items()))
+    # Alphabetical, ignoring category order: the picker is a lookup by code, and
+    # grouping by category made the reviewer hunt through 137 options in taxonomy
+    # order. The filter input above it narrows the same list as she types.
+    codes = alpha_codes([c["code"] for c in approved_codes(cur)])
+    pick_opts = "".join(f'<option value="{esc(c)}">{esc(c)}</option>' for c in codes)
 
     hist = []
     for p in prior:
@@ -3419,7 +3491,8 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
     <p>{("Pick the code this record should report as." if ai else "The AI assigned no code — pick the one this record should report as, or mark it not a complaint below.")}
       The current label stays in the history.</p>
     <div><label for="pick-{rid}">Complaint code</label>
-      <select id="pick-{rid}" name="pick"><option value="">choose a code…</option>{groups}</select></div>
+      {code_filter_bar(f"pick-{rid}", len(codes))}
+      <select id="pick-{rid}" name="pick"><option value="">choose a code…</option>{pick_opts}</select></div>
     <div><label for="note-{rid}">Note (optional)</label>
       <input id="note-{rid}" name="note" placeholder="Why you changed it"></div>
     <div class="btnrow"><button name="action" value="correct">Save correction</button></div>
@@ -3455,6 +3528,8 @@ def p_review(cur, rid, q, msg="", err=False, ctx=None, partial=False):
         return inner
     body = (f'<p class="sub" style="margin:0 0 4px"><a href="/reviews">← back to complaint records</a></p>'
             f'<div style="max-width:820px">{inner}</div>')
+    ctx = dict(ctx or {})
+    ctx["scripts"] = CODE_FILTER_JS
     return page(f"Review {rid}", body, "/reviews", msg, err, ctx)
 
 
@@ -3900,6 +3975,12 @@ def p_codes(cur, q, msg="", ctx=None, err=False):
     cats = sorted({c["category"] for c in approved if c["category"]})
     cur.execute("SELECT code, replacement FROM code_denials")
     denials = {r["code"]: r["replacement"] for r in cur.fetchall()}
+    # A code a person added herself, rather than one the classifier proposed.
+    # complaint_codes has no timestamp column, so the list can only name the code
+    # and its category — it does not invent a "when".
+    cur.execute("""SELECT code, category FROM complaint_codes
+                    WHERE source='chadia-approved' ORDER BY code""")
+    person_added = cur.fetchall()
 
     trs = []
     pending = [r["code"] for r in rows if r["status"] == "pending"]
@@ -3966,6 +4047,39 @@ def p_codes(cur, q, msg="", ctx=None, err=False):
             trs.append(f'<tr class="evrow"><td colspan="4" class="evcell">'
                        f'{evidence_html(evidence.get(r["code"]) or [])}</td></tr>')
 
+    cat_opts_add = "".join(f'<option value="{esc(c)}">{esc(c)}</option>' for c in cats)
+    if person_added:
+        person_list = ('<ul class="wholist">' + "".join(
+            f'<li><b>{esc(p["code"])}</b> <span class="meta">· {esc(p["category"] or "Uncategorised")}</span></li>'
+            for p in person_added) + "</ul>"
+            '<div class="meta">The code table keeps no added-at timestamp, so the list shows what was '
+            'added and where it files, not when.</div>')
+    else:
+        person_list = '<div class="meta">No codes added by hand yet.</div>'
+    # A person can introduce a code the classifier never proposed. Same approved
+    # row and same vocabulary write the Approve button performs, so there is one
+    # definition of "a code the classifier can emit", not two.
+    add_form = f"""<div class="card addcode">
+  <h2 style="margin-top:0">Add a code yourself</h2>
+  <p class="meta" style="margin:0 0 10px">The classifier can only propose what it has seen. If you already
+    know the code a record should carry, add it here — it is approved on the spot and written to the
+    vocabulary file the classifier loads, so the next batch can emit it.</p>
+  <form method="post" action="/codes" class="addform">
+    <input type="hidden" name="action" value="add">
+    <div><label for="new-code">Code</label>
+      <input id="new-code" name="new_code" type="text" autocomplete="off"
+             placeholder="e.g. Arrived Damaged" aria-describedby="new-code-hint"></div>
+    <div><label for="new-cat">Category</label>
+      <select id="new-cat" name="new_category">
+        <option value="">pick a category…</option>{cat_opts_add}</select></div>
+    <div class="addbtn"><button class="primary">Add code</button></div>
+  </form>
+  <div class="meta" id="new-code-hint">Up to 120 characters; surrounding and repeated spaces are
+    trimmed. A code that already exists — approved or denied — is refused rather than
+    silently re-categorised.</div>
+  <h3 class="whoh">Added by a person</h3>
+  {person_list}
+</div>"""
     body = f"""<h1>New complaint codes</h1>
 <p class="sub">Codes the classifier produced that the module does not have. Each one carries the records behind
 it — SKU, ASIN, product title and the customer's full comment — so the decision is made against the text, not a
@@ -3977,6 +4091,7 @@ records out of every rollup. <b>Use a different code</b> is the same deny with a
 not have to be in the vocabulary yet, and when it is new you give it a category here. Where a replacement was
 prescribed for the code, it is selected in the dropdown and
 named on the button — nothing is applied behind your back.</p>
+{add_form}
 <div class="card"><table><thead><tr><th>Code</th><th class="num">Records</th><th>Example</th><th>Decision</th></tr></thead>
 <tbody>{''.join(trs) or '<tr><td colspan="4" class="empty">Nothing proposed.</td></tr>'}</tbody></table></div>"""
     # err is passed through: a refused deny/own-code is a refusal, and a green
@@ -4071,9 +4186,68 @@ def do_own_code(cur, f, who, code):
             + tail_note + tail), False
 
 
+def do_add_code(cur, f):
+    """A code the reviewer introduces herself. -> (message, is_error)
+
+    The same row and the same vocabulary write the Approve button performs, so
+    there is one definition of "a code the classifier can emit" rather than a
+    second writer. Nothing is changed unless the insert commits: a refusal or a
+    failed write leaves complaint_codes and the vocabulary file untouched.
+    """
+    code = " ".join((f.get("new_code") or "").split())   # trim + collapse inner runs
+    if not code:
+        return "Type the code you want to add — an empty code cannot be stored.", True
+    if len(code) > 120:
+        return (f"That code is {len(code)} characters — 120 is the maximum the vocabulary stores. "
+                "Shorten it and add it again."), True
+    cat = (f.get("new_category") or "").strip()[:80]
+    if not cat:
+        return (f"Pick a category for “{code}” — a code with no category cannot appear in the rollups."), True
+
+    # Case-insensitive against the whole table, approved or denied: a denied code
+    # is still a code with history, and re-adding it would quietly reverse a call.
+    cur.execute("SELECT code FROM complaint_codes WHERE LOWER(code)=LOWER(%s)", (code,))
+    hit = cur.fetchone()
+    if hit:
+        return (f"“{hit['code']}” is already in the code list, so nothing was added. "
+                "Use it as it stands; if it should be gone, decide it from the queue instead."), True
+
+    conn = cur.connection
+    try:
+        conn.autocommit(False)
+    except Exception:                     # already in manual mode
+        pass
+    try:
+        cur.execute("""INSERT INTO complaint_codes (code, category, source, approved)
+                       VALUES (%s,%s,'chadia-approved',1)""", (code, cat))
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        return (f"Nothing was added: “{code}” could not be stored ({exc})."), True
+    finally:
+        try:
+            conn.autocommit(True)
+        except Exception:
+            pass
+
+    # The same vocabulary leg the approve path writes. The database row is the
+    # durable record; this file is what the classifier loads, so a failure here
+    # is reported, never claimed as done.
+    vpath, verr = vocab_upsert(code, cat)
+    if vpath:
+        tail = f" Written to {os.path.relpath(vpath)} — the next classification batch can emit it."
+    else:
+        tail = (" The database row is the durable record (approved=1); the classifier vocabulary file "
+                f"was NOT updated ({verr}), so it cannot be emitted until data/vocab_additions.csv is "
+                "written on the refresh host.")
+    return f"Added “{code}” as {cat}. It is approved, and the complaint pickers now list it." + tail, False
+
+
 def do_code(cur, f, who):
     code = (f.get("code") or "").strip()
     act = f.get("action") or ""
+    if act == "add":
+        return do_add_code(cur, f)
     if not code or act not in ("approved", "denied", "own"):
         return "Bad request.", True
     cur.execute("SELECT status FROM proposed_codes WHERE code=%s", (code,))
@@ -4306,7 +4480,7 @@ def p_quality(cur, q, msg="", ctx=None):
     s = cur.fetchone()
     coverage = float(s["h"] or 0) * 100.0 / max(1, s["n"])
 
-    codes = [c["code"] for c in approved_codes(cur)]
+    codes = alpha_codes([c["code"] for c in approved_codes(cur)])
     trs = []
     for i, r in enumerate(rows, 1):
         rid = r["review_id"]
@@ -4319,9 +4493,14 @@ def p_quality(cur, q, msg="", ctx=None):
             cell = '<span class="pill">N/A — no customer comment</span>'
             state = "na"
         else:
-            sel = (f'<select name="call_{rid}" form="qform" class="qcall">'
+            # Same alphabetical order and the same type-to-find as the drawer:
+            # one row's picker is narrow, so the filter sits directly above it and
+            # reports how much of the list is left.
+            sid = f"call-{rid}"
+            sel = (code_filter_bar(sid, len(codes))
+                   + f'<select name="call_{rid}" id="{sid}" form="qform" class="qcall">'
                    f'<option value="">— not called —</option>'
-                   f'<option value="{NOT_A_COMPLAINT}"'
+                   f'<option value="{NOT_A_COMPLAINT}" data-fixed="1"'
                    f'{" selected" if norm(called) == NOT_A_COMPLAINT else ""}>not a complaint</option>'
                    + "".join(
                        f'<option value="{esc(c)}"{" selected" if norm(called) == norm(c) else ""}>{esc(c)}</option>'
@@ -4419,6 +4598,8 @@ reach are still auditable.</p>
 <h2>Weekly trend</h2>
 <div class="card"><table><thead><tr><th>Week</th><th class="num">Sample</th><th class="num">Agreement</th><th>Note</th></tr></thead>
 <tbody>{trend or '<tr><td colspan="4" class="empty">No weekly check recorded yet.</td></tr>'}</tbody></table></div>"""
+    ctx = dict(ctx or {})
+    ctx["scripts"] = ctx.get("scripts", "") + CODE_FILTER_JS
     return page("Quality", body, "/quality", msg, ctx=ctx)
 
 
