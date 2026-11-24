@@ -250,6 +250,13 @@ SELECT c.review_id, c.review_date, c.sku, c.asin, c.parent, c.product, c.title,
   LEFT JOIN (SELECT LOWER(code) lc, MIN(code) code, MAX(category) category
                FROM complaint_codes GROUP BY LOWER(code)) kc
          ON kc.lc = LOWER(COALESCE(NULLIF(k.new_complaint, ''), c.complaint))
+ -- SCOPE, stated by the CX reviewer: the sources are FBA returns, NCX and Amazon
+ -- reviews rated 1-3 stars. A 4 or 5 star review is outside that scope, so it is
+ -- excluded here rather than deleted: the classification row stays for audit, and
+ -- every card, chart, rate and export reads through this view, so none of them can
+ -- show a record the reviewer has already said does not belong. Without this the
+ -- label 'Amazon 1-3 star review' would be false the moment a 4 star arrived.
+ WHERE c.rating IS NULL OR c.rating <= 3
 """),
     ("v_ai_complaints_monthly", f"""
 CREATE OR REPLACE VIEW v_ai_complaints_monthly AS
